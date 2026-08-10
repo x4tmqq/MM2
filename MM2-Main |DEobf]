@@ -1,0 +1,2107 @@
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+local UserInputService = game:GetService("UserInputService")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local StarterGui = game:GetService("StarterGui")
+local Workspace = game:GetService("Workspace")
+local TweenService = game:GetService("TweenService")
+local CollectionService = game:GetService("CollectionService")
+local LocalPlayer = Players.LocalPlayer
+if not LocalPlayer then return end
+
+local Config = {
+    WalkSpeedEnabled = false,
+    WalkSpeed = 16,
+    JumpPowerEnabled = false,
+    JumpPower = 50,
+    InfiniteJump = false,
+    SpamJump = false,
+    GravityEnabled = false,
+    Gravity = 196.2,
+    FlyEnabled = false,
+    FlyMethod = "BodyVelocity + Gyro",
+    FlySpeed = 50,
+    NoclipEnabled = false,
+    HLFillTrans = 0.7,
+    HLOutlineTrans = 0.65,
+    InstantRespawn = false,
+    FOVEnabled = false,
+    FOVValue = 70,
+    DezoomEnabled = false,
+    DezoomValue = 50,
+    AutoGrabGun = false,
+    GrabMethod = "TP to Gun",
+    DodgeKnifeThrow = false,
+    DodgeMethod = "SafePlace",
+    GrabKeybind = "Y",
+}
+
+local ESP = {
+    MurdererHighlight = false,
+    SheriffHighlight = false,
+    InnocentHighlight = false,
+    MurdererTracer = false,
+    SheriffTracer = false,
+    InnocentTracer = false,
+    MurdererSkeleton = false,
+    SheriffSkeleton = false,
+    InnocentSkeleton = false,
+    MurdererColor = Color3.fromRGB(255, 0, 0),
+    SheriffColor = Color3.fromRGB(0, 100, 255),
+    InnocentColor = Color3.fromRGB(0, 255, 0),
+    MaxDistance = 0,
+    SkeletonThickness = 1.5,
+}
+
+type CleanupItem = RBXScriptConnection | (() -> ()) | Instance
+
+local Maid = {}
+Maid.__index = Maid
+
+function Maid.new(): any
+    return setmetatable({ _items = {} }, Maid)
+end
+
+function Maid:add(item: CleanupItem): CleanupItem
+    table.insert(self._items, item)
+    return item
+end
+
+function Maid:cleanup()
+    local items = self._items
+    for i = #items, 1, -1 do
+        local item = items[i]
+        local itemType = typeof(item)
+        if itemType == "RBXScriptConnection" then
+            item:Disconnect()
+        elseif itemType == "function" then
+            item()
+        elseif itemType == "Instance" then
+            item:Destroy()
+        end
+    end
+    table.clear(items)
+end
+
+local maid = Maid.new()
+local characterMaid: Maid? = nil
+local currentCharacter: Model? = nil
+local infiniteJumpConnection: RBXScriptConnection? = nil
+local spamJumpConnection: RBXScriptConnection? = nil
+local noclipConnection: RBXScriptConnection? = nil
+
+local flyBV: BodyVelocity? = nil
+local flyBG: BodyGyro? = nil
+local flySeat: VehicleSeat? = nil
+local flyWeld: Weld? = nil
+local flyActive = false
+local flyConnection: RBXScriptConnection? = nil
+
+local ESPHighlights = {}
+local tracerCache = {}
+local skeletonCache = {}
+local ESPUpdateConnection: RBXScriptConnection? = nil
+local playerAddedConnection: RBXScriptConnection? = nil
+local playerRemovingConnection: RBXScriptConnection? = nil
+local characterAddedConnections = {}
+
+local fovConnection: RBXScriptConnection? = nil
+
+local autoGrabConnection: RBXScriptConnection? = nil
+local autoGrabRunning = false
+local lastGrabTime = 0
+
+local dodgeKnifeList = {}
+local dodgeActive = false
+local safePlaceOriginalPos = nil
+local isInSafePlace = false
+local dodgeDescendantAddedConn: RBXScriptConnection? = nil
+
+local firstHide = true
+
+local function hasItemInBackpack(player: Player, itemName: string): boolean
+    local backpack = player:FindFirstChildOfClass("Backpack")
+    if backpack then
+        for _, item in ipairs(backpack:GetChildren()) do
+            if item:IsA("Tool") and item.Name:find(itemName) then
+                return true
+            end
+        end
+    end
+    return false
+end
+
+local function hasItemEquipped(char: Model, itemName: string): boolean
+    for _, item in ipairs(char:GetChildren()) do
+        if item:IsA("Tool") and item.Name:find(itemName) then
+            return true
+        end
+    end
+    return false
+end
+
+local function getPlayerRole(player: Player): (string, Color3)
+    local char = player.Character
+    if not char then 
+        if hasItemInBackpack(player, "Knife") or hasItemInBackpack(player, "Dagger") or hasItemInBackpack(player, "Sword") then
+            return "Murderer", ESP.MurdererColor
+        elseif hasItemInBackpack(player, "Gun") or hasItemInBackpack(player, "Pistol") or hasItemInBackpack(player, "Shotgun") then
+            return "Sheriff", ESP.SheriffColor
+        end
+        return "Innocent", ESP.InnocentColor
+    end
+    
+    local hasKnife = hasItemEquipped(char, "Knife") or hasItemEquipped(char, "Dagger") or hasItemEquipped(char, "Sword")
+    local hasGun = hasItemEquipped(char, "Gun") or hasItemEquipped(char, "Pistol") or hasItemEquipped(char, "Shotgun")
+    
+    if not hasKnife then
+        hasKnife = hasItemInBackpack(player, "Knife") or hasItemInBackpack(player, "Dagger") or hasItemInBackpack(player, "Sword")
+    end
+    
+    if not hasGun then
+        hasGun = hasItemInBackpack(player, "Gun") or hasItemInBackpack(player, "Pistol") or hasItemInBackpack(player, "Shotgun")
+    end
+    
+    if hasKnife then
+        return "Murderer", ESP.MurdererColor
+    elseif hasGun then
+        return "Sheriff", ESP.SheriffColor
+    else
+        return "Innocent", ESP.InnocentColor
+    end
+end
+
+local function getTracer(id: string): any
+    if not Drawing then return nil end
+    if not tracerCache[id] then
+        local line = Drawing.new("Line")
+        line.Thickness = 1.5
+        line.Transparency = 1
+        tracerCache[id] = line
+    end
+    return tracerCache[id]
+end
+
+local function clearTracers()
+    if not Drawing then return end
+    for id, line in pairs(tracerCache) do
+        if line then
+            line.Visible = false
+        end
+    end
+end
+
+local function createSkeletonLine()
+    if not Drawing then return nil end
+    local line = Drawing.new("Line")
+    line.Thickness = ESP.SkeletonThickness
+    line.Transparency = 1
+    line.Visible = false
+    return line
+end
+
+local function getSkeletonLines(player: Player): {[number]: any}
+    if not skeletonCache[player] then
+        skeletonCache[player] = {}
+        for i = 1, 12 do
+            skeletonCache[player][i] = createSkeletonLine()
+        end
+    end
+    return skeletonCache[player]
+end
+
+local function clearSkeletons()
+    if not Drawing then return end
+    for player, lines in pairs(skeletonCache) do
+        for _, line in pairs(lines) do
+            if line then
+                line.Visible = false
+            end
+        end
+    end
+end
+
+local function updateSkeletons()
+    if not Drawing then return end
+
+    local cam = Workspace.CurrentCamera
+    if not cam then return end
+
+    local localChar = LocalPlayer.Character
+    if not localChar then return end
+    local localRoot = localChar:FindFirstChild("HumanoidRootPart")
+    if not localRoot then return end
+
+    local activeSkeletonRoles = {}
+    if ESP.MurdererSkeleton then activeSkeletonRoles["Murderer"] = true end
+    if ESP.SheriffSkeleton then activeSkeletonRoles["Sheriff"] = true end
+    if ESP.InnocentSkeleton then activeSkeletonRoles["Innocent"] = true end
+
+    if not next(activeSkeletonRoles) then
+        clearSkeletons()
+        return
+    end
+
+    for _, player in ipairs(Players:GetPlayers()) do
+        if player == LocalPlayer then continue end
+
+        local char = player.Character
+        if not char then
+            if skeletonCache[player] then
+                for _, line in pairs(skeletonCache[player]) do
+                    if line then line.Visible = false end
+                end
+            end
+            continue
+        end
+
+        local role, color = getPlayerRole(player)
+        local shouldSkeleton = activeSkeletonRoles[role] or false
+
+        if not shouldSkeleton then
+            if skeletonCache[player] then
+                for _, line in pairs(skeletonCache[player]) do
+                    if line then line.Visible = false end
+                end
+            end
+            continue
+        end
+
+        local root = char:FindFirstChild("HumanoidRootPart")
+        if not root then
+            if skeletonCache[player] then
+                for _, line in pairs(skeletonCache[player]) do
+                    if line then line.Visible = false end
+                end
+            end
+            continue
+        end
+
+        if ESP.MaxDistance > 0 then
+            local dist = (root.Position - localRoot.Position).Magnitude
+            if dist > ESP.MaxDistance then
+                if skeletonCache[player] then
+                    for _, line in pairs(skeletonCache[player]) do
+                        if line then line.Visible = false end
+                    end
+                end
+                continue
+            end
+        end
+
+        local humanoid = char:FindFirstChildOfClass("Humanoid")
+        if not humanoid then
+            if skeletonCache[player] then
+                for _, line in pairs(skeletonCache[player]) do
+                    if line then line.Visible = false end
+                end
+            end
+            continue
+        end
+
+        local lines = getSkeletonLines(player)
+        if not lines then continue end
+
+        local joints = {}
+        local connections = {}
+
+        if humanoid.RigType == Enum.HumanoidRigType.R15 then
+            joints = {
+                ["Head"] = char:FindFirstChild("Head"),
+                ["UpperTorso"] = char:FindFirstChild("UpperTorso"),
+                ["LowerTorso"] = char:FindFirstChild("LowerTorso"),
+                ["LeftUpperArm"] = char:FindFirstChild("LeftUpperArm"),
+                ["LeftLowerArm"] = char:FindFirstChild("LeftLowerArm"),
+                ["LeftHand"] = char:FindFirstChild("LeftHand"),
+                ["RightUpperArm"] = char:FindFirstChild("RightUpperArm"),
+                ["RightLowerArm"] = char:FindFirstChild("RightLowerArm"),
+                ["RightHand"] = char:FindFirstChild("RightHand"),
+                ["LeftUpperLeg"] = char:FindFirstChild("LeftUpperLeg"),
+                ["LeftLowerLeg"] = char:FindFirstChild("LeftLowerLeg"),
+                ["RightUpperLeg"] = char:FindFirstChild("RightUpperLeg"),
+                ["RightLowerLeg"] = char:FindFirstChild("RightLowerLeg"),
+            }
+            connections = {
+                { "Head", "UpperTorso" },
+                { "UpperTorso", "LowerTorso" },
+                { "LowerTorso", "LeftUpperLeg" },
+                { "LeftUpperLeg", "LeftLowerLeg" },
+                { "LowerTorso", "RightUpperLeg" },
+                { "RightUpperLeg", "RightLowerLeg" },
+                { "UpperTorso", "LeftUpperArm" },
+                { "LeftUpperArm", "LeftLowerArm" },
+                { "LeftLowerArm", "LeftHand" },
+                { "UpperTorso", "RightUpperArm" },
+                { "RightUpperArm", "RightLowerArm" },
+                { "RightLowerArm", "RightHand" },
+            }
+        elseif humanoid.RigType == Enum.HumanoidRigType.R6 then
+            joints = {
+                ["Head"] = char:FindFirstChild("Head"),
+                ["Torso"] = char:FindFirstChild("Torso"),
+                ["LeftLeg"] = char:FindFirstChild("Left Leg"),
+                ["RightLeg"] = char:FindFirstChild("Right Leg"),
+                ["LeftArm"] = char:FindFirstChild("Left Arm"),
+                ["RightArm"] = char:FindFirstChild("Right Arm"),
+            }
+            connections = {
+                { "Head", "Torso" },
+                { "Torso", "LeftArm" },
+                { "Torso", "RightArm" },
+                { "Torso", "LeftLeg" },
+                { "Torso", "RightLeg" },
+            }
+        else
+            for _, line in pairs(lines) do
+                if line then line.Visible = false end
+            end
+            continue
+        end
+
+        for index, connection in ipairs(connections) do
+            local jointA = joints[connection[1]]
+            local jointB = joints[connection[2]]
+            local line = lines[index]
+
+            if not line then continue end
+
+            if jointA and jointB then
+                local posA, onScreenA = cam:WorldToViewportPoint(jointA.Position)
+                local posB, onScreenB = cam:WorldToViewportPoint(jointB.Position)
+
+                line.Color = color
+                line.Thickness = ESP.SkeletonThickness
+                line.Transparency = 1
+
+                if onScreenA and onScreenB then
+                    if humanoid.RigType == Enum.HumanoidRigType.R6 then
+                        if connection[2] == "LeftArm" or connection[2] == "RightArm" then
+                            local offsetY = 0.5
+                            posB = cam:WorldToViewportPoint(jointB.Position + Vector3.new(0, offsetY, 0))
+                        end
+                    end
+
+                    line.From = Vector2.new(posA.X, posA.Y)
+                    line.To = Vector2.new(posB.X, posB.Y)
+                    line.Visible = true
+                else
+                    line.Visible = false
+                end
+            else
+                line.Visible = false
+            end
+        end
+
+        for i = #connections + 1, 12 do
+            local line = lines[i]
+            if line then line.Visible = false end
+        end
+    end
+end
+
+local function setWalkSpeed(enabled: boolean, speed: number): ()
+    local char = LocalPlayer.Character
+    if not char then return end
+    local humanoid = char:FindFirstChildOfClass("Humanoid")
+    if humanoid then
+        humanoid.WalkSpeed = enabled and speed or 16
+    end
+end
+
+local function setJumpPower(enabled: boolean, power: number): ()
+    local char = LocalPlayer.Character
+    if not char then return end
+    local humanoid = char:FindFirstChildOfClass("Humanoid")
+    if humanoid then
+        humanoid.JumpPower = enabled and power or 50
+    end
+end
+
+local function setGravity(enabled: boolean, value: number): ()
+    Workspace.Gravity = enabled and value or 196.2
+end
+
+local function setNoclip(enabled: boolean): ()
+    if noclipConnection then
+        noclipConnection:Disconnect()
+        noclipConnection = nil
+    end
+
+    if enabled then
+        noclipConnection = RunService.Heartbeat:Connect(function()
+            local c = LocalPlayer.Character
+            if not c then return end
+            
+            for _, part in ipairs(c:GetDescendants()) do
+                if part:IsA("BasePart") then
+                    part.CanCollide = false
+                end
+            end
+        end)
+        maid:add(noclipConnection)
+    else
+        local c = LocalPlayer.Character
+        if c then
+            for _, part in ipairs(c:GetDescendants()) do
+                if part:IsA("BasePart") and (part:IsA("MeshPart") or part:IsA("Part")) then
+                    part.CanCollide = true
+                end
+            end
+        end
+    end
+end
+
+local function cleanFly(): ()
+    if flyBV then flyBV:Destroy(); flyBV = nil end
+    if flyBG then flyBG:Destroy(); flyBG = nil end
+    if flySeat then flySeat:Destroy(); flySeat = nil end
+    if flyWeld then flyWeld:Destroy(); flyWeld = nil end
+    if flyConnection then flyConnection:Disconnect(); flyConnection = nil end
+
+    if infiniteJumpConnection then
+        infiniteJumpConnection:Disconnect()
+        infiniteJumpConnection = nil
+    end
+
+    if spamJumpConnection then
+        spamJumpConnection:Disconnect()
+        spamJumpConnection = nil
+    end
+
+    local char = LocalPlayer.Character
+    if char then
+        local hum = char:FindFirstChildOfClass("Humanoid")
+        if hum then
+            hum.PlatformStand = false
+            hum:SetStateEnabled(Enum.HumanoidStateType.Seated, true)
+            if hum.SeatPart then hum:Sit(false) end
+        end
+    end
+    flyActive = false
+end
+
+local function setupFlyMovement(): ()
+    if flyConnection then
+        flyConnection:Disconnect()
+        flyConnection = nil
+    end
+
+    if not flyActive then return end
+
+    flyConnection = RunService.RenderStepped:Connect(function(dt: number)
+        if not flyActive then return end
+        local c = LocalPlayer.Character
+        if not c then return end
+        local root = c:FindFirstChild("HumanoidRootPart")
+        if not root then return end
+
+        local cam = Workspace.CurrentCamera
+        if not cam then return end
+
+        local move = Vector3.new()
+        if UserInputService:IsKeyDown(Enum.KeyCode.W) then
+            move = move + cam.CFrame.LookVector
+        end
+        if UserInputService:IsKeyDown(Enum.KeyCode.S) then
+            move = move - cam.CFrame.LookVector
+        end
+        if UserInputService:IsKeyDown(Enum.KeyCode.A) then
+            move = move - cam.CFrame.RightVector
+        end
+        if UserInputService:IsKeyDown(Enum.KeyCode.D) then
+            move = move + cam.CFrame.RightVector
+        end
+        if UserInputService:IsKeyDown(Enum.KeyCode.Space) then
+            move = move + Vector3.new(0, 1, 0)
+        end
+        if UserInputService:IsKeyDown(Enum.KeyCode.LeftShift) then
+            move = move - Vector3.new(0, 1, 0)
+        end
+
+        if move.Magnitude > 0 then
+            move = move.Unit
+        end
+
+        local method = Config.FlyMethod
+        local speed = Config.FlySpeed
+
+        if method == "CFrame" then
+            root.CFrame = root.CFrame + move * speed * dt
+        elseif method == "BodyVelocity + Gyro" then
+            if flyBV and flyBG then
+                flyBG.CFrame = cam.CFrame
+                flyBV.Velocity = move * speed
+            end
+        elseif method == "Seat" then
+            if flyBV and flyBG and flySeat then
+                flyBG.CFrame = cam.CFrame
+                flyBV.Velocity = move * speed
+            end
+        end
+    end)
+    maid:add(flyConnection)
+end
+
+local function setFly(enabled: boolean, method: string, speed: number): ()
+    local char = LocalPlayer.Character
+    if not char then return end
+    local hrp = char:FindFirstChild("HumanoidRootPart")
+    local hum = char:FindFirstChildOfClass("Humanoid")
+    if not hrp or not hum then return end
+
+    cleanFly()
+
+    if not enabled then
+        flyActive = false
+        return end
+
+    flyActive = true
+
+    if method == "CFrame" then
+        hum.PlatformStand = true
+    elseif method == "BodyVelocity + Gyro" then
+        flyBV = Instance.new("BodyVelocity")
+        flyBV.MaxForce = Vector3.new(1e6, 1e6, 1e6)
+        flyBV.Parent = hrp
+
+        flyBG = Instance.new("BodyGyro")
+        flyBG.MaxTorque = Vector3.new(1e6, 1e6, 1e6)
+        flyBG.Parent = hrp
+    elseif method == "Seat" then
+        flySeat = Instance.new("VehicleSeat")
+        flySeat.Size = Vector3.new(1, 1, 1)
+        flySeat.Transparency = 1
+        flySeat.CanCollide = false
+        flySeat.Parent = Workspace
+
+        flyWeld = Instance.new("Weld")
+        flyWeld.Part0 = hrp
+        flyWeld.Part1 = flySeat
+        flyWeld.C0 = CFrame.new(0, -1.5, 0)
+        flyWeld.Parent = flySeat
+
+        hum:Sit(true)
+        hum.PlatformStand = true
+        hum:SetStateEnabled(Enum.HumanoidStateType.Seated, false)
+
+        flyBV = Instance.new("BodyVelocity")
+        flyBV.MaxForce = Vector3.new(1e6, 1e6, 1e6)
+        flyBV.Parent = flySeat
+
+        flyBG = Instance.new("BodyGyro")
+        flyBG.MaxTorque = Vector3.new(1e6, 1e6, 1e6)
+        flyBG.Parent = flySeat
+    end
+
+    setupFlyMovement()
+end
+
+local function setupInfiniteJump(enabled: boolean): ()
+    if infiniteJumpConnection then
+        infiniteJumpConnection:Disconnect()
+        infiniteJumpConnection = nil
+    end
+
+    if not enabled then return end
+
+    infiniteJumpConnection = UserInputService.JumpRequest:Connect(function()
+        local c = LocalPlayer.Character
+        if not c then return end
+        local root = c:FindFirstChild("HumanoidRootPart")
+        local hum = c:FindFirstChildOfClass("Humanoid")
+        if root and hum then
+            local power = Config.JumpPowerEnabled and Config.JumpPower or 50
+            root.Velocity = Vector3.new(root.Velocity.X, power, root.Velocity.Z)
+            hum:ChangeState(Enum.HumanoidStateType.Jumping)
+        end
+    end)
+    maid:add(infiniteJumpConnection)
+end
+
+local function setupSpamJump(enabled: boolean): ()
+    if spamJumpConnection then
+        spamJumpConnection:Disconnect()
+        spamJumpConnection = nil
+    end
+
+    if not enabled then return end
+
+    local c = LocalPlayer.Character
+    if not c then return end
+    local hum = c:FindFirstChildOfClass("Humanoid")
+    if not hum then return end
+
+    task.wait(0.1)
+    hum:ChangeState(Enum.HumanoidStateType.Jumping)
+
+    spamJumpConnection = hum.StateChanged:Connect(function(_, newState)
+        if newState == Enum.HumanoidStateType.Landed then
+            if hum.Health > 0 then
+                task.wait()
+                hum:ChangeState(Enum.HumanoidStateType.Jumping)
+            end
+        end
+    end)
+    maid:add(spamJumpConnection)
+end
+
+local function clearESP()
+    for _, highlight in ipairs(ESPHighlights) do
+        if highlight and highlight.Parent then
+            highlight:Destroy()
+        end
+    end
+    table.clear(ESPHighlights)
+    
+    clearTracers()
+    
+    clearSkeletons()
+    
+    if ESPUpdateConnection then
+        ESPUpdateConnection:Disconnect()
+        ESPUpdateConnection = nil
+    end
+end
+
+local function updateTracers()
+    if not Drawing then return end
+    
+    local cam = Workspace.CurrentCamera
+    if not cam then return end
+    
+    local localChar = LocalPlayer.Character
+    if not localChar then return end
+    local localRoot = localChar:FindFirstChild("HumanoidRootPart")
+    if not localRoot then return end
+    
+    local activeTracerRoles = {}
+    if ESP.MurdererTracer then activeTracerRoles["Murderer"] = true end
+    if ESP.SheriffTracer then activeTracerRoles["Sheriff"] = true end
+    if ESP.InnocentTracer then activeTracerRoles["Innocent"] = true end
+    
+    if not next(activeTracerRoles) then
+        clearTracers()
+        return
+    end
+    
+    for _, player in ipairs(Players:GetPlayers()) do
+        if player == LocalPlayer then continue end
+        
+        local char = player.Character
+        local root = char and char:FindFirstChild("HumanoidRootPart")
+        
+        if not root then
+            local line = getTracer(tostring(player.UserId))
+            if line then line.Visible = false end
+            continue
+        end
+        
+        local role, color = getPlayerRole(player)
+        local shouldTracer = activeTracerRoles[role] or false
+        
+        local line = getTracer(tostring(player.UserId))
+        if not line then continue end
+        
+        if shouldTracer then
+            if ESP.MaxDistance > 0 then
+                local dist = (root.Position - localRoot.Position).Magnitude
+                if dist > ESP.MaxDistance then
+                    line.Visible = false
+                    continue
+                end
+            end
+            
+            local vector, onScreen = cam:WorldToViewportPoint(root.Position + Vector3.new(0, 1.5, 0))
+            if onScreen then
+                line.From = Vector2.new(cam.ViewportSize.X / 2, cam.ViewportSize.Y)
+                line.To = Vector2.new(vector.X, vector.Y)
+                line.Color = color
+                line.Thickness = 1.5
+                line.Transparency = 1
+                line.Visible = true
+            else
+                line.Visible = false
+            end
+        else
+            line.Visible = false
+        end
+    end
+end
+
+local function updateHighlights()
+    local localChar = LocalPlayer.Character
+    if not localChar then return end
+    
+    local localRoot = localChar:FindFirstChild("HumanoidRootPart")
+    if not localRoot then return end
+    
+    local activeHighlightRoles = {}
+    if ESP.MurdererHighlight then activeHighlightRoles["Murderer"] = true end
+    if ESP.SheriffHighlight then activeHighlightRoles["Sheriff"] = true end
+    if ESP.InnocentHighlight then activeHighlightRoles["Innocent"] = true end
+    
+    if not next(activeHighlightRoles) then return end
+    
+    for _, player in ipairs(Players:GetPlayers()) do
+        if player ~= LocalPlayer then
+            local char = player.Character
+            local root = char and char:FindFirstChild("HumanoidRootPart")
+            
+            if not root then
+                local role, color = getPlayerRole(player)
+                local shouldHighlight = activeHighlightRoles[role] or false
+                
+                if shouldHighlight then
+                    local highlight = Instance.new("Highlight")
+                    highlight.Adornee = player
+                    highlight.FillColor = color
+                    highlight.FillTransparency = Config.HLFillTrans
+                    highlight.OutlineColor = color
+                    highlight.OutlineTransparency = Config.HLOutlineTrans
+                    highlight.Parent = player
+                    table.insert(ESPHighlights, highlight)
+                end
+                continue
+            end
+            
+            if ESP.MaxDistance > 0 then
+                local distance = (root.Position - localRoot.Position).Magnitude
+                if distance > ESP.MaxDistance then
+                    continue
+                end
+            end
+            
+            local role, color = getPlayerRole(player)
+            
+            if activeHighlightRoles[role] then
+                local highlight = Instance.new("Highlight")
+                highlight.Adornee = char
+                highlight.FillColor = color
+                highlight.FillTransparency = Config.HLFillTrans
+                highlight.OutlineColor = color
+                highlight.OutlineTransparency = Config.HLOutlineTrans
+                highlight.Parent = char
+                table.insert(ESPHighlights, highlight)
+            end
+        end
+    end
+end
+
+local function updateESP()
+    for _, highlight in ipairs(ESPHighlights) do
+        if highlight and highlight.Parent then
+            highlight:Destroy()
+        end
+    end
+    table.clear(ESPHighlights)
+    
+    local hasAnyActive = ESP.MurdererHighlight or ESP.SheriffHighlight or ESP.InnocentHighlight
+                        or ESP.MurdererTracer or ESP.SheriffTracer or ESP.InnocentTracer
+                        or ESP.MurdererSkeleton or ESP.SheriffSkeleton or ESP.InnocentSkeleton
+    
+    if not hasAnyActive then
+        clearTracers()
+        clearSkeletons()
+        return
+    end
+    
+    updateHighlights()
+    updateTracers()
+    updateSkeletons()
+end
+
+local function startESP()
+    clearESP()
+    updateESP()
+    
+    if ESPUpdateConnection then
+        ESPUpdateConnection:Disconnect()
+        ESPUpdateConnection = nil
+    end
+    
+    ESPUpdateConnection = RunService.Heartbeat:Connect(function()
+        updateESP()
+    end)
+    maid:add(ESPUpdateConnection)
+end
+
+local function onPlayerAdded(player: Player)
+    local conn = player.CharacterAdded:Connect(function()
+        task.wait(0.2)
+        if ESP.MurdererHighlight or ESP.SheriffHighlight or ESP.InnocentHighlight
+        or ESP.MurdererTracer or ESP.SheriffTracer or ESP.InnocentTracer
+        or ESP.MurdererSkeleton or ESP.SheriffSkeleton or ESP.InnocentSkeleton then
+            startESP()
+        end
+    end)
+    characterAddedConnections[player] = conn
+    
+    if player.Character then
+        task.wait(0.2)
+        if ESP.MurdererHighlight or ESP.SheriffHighlight or ESP.InnocentHighlight
+        or ESP.MurdererTracer or ESP.SheriffTracer or ESP.InnocentTracer
+        or ESP.MurdererSkeleton or ESP.SheriffSkeleton or ESP.InnocentSkeleton then
+            startESP()
+        end
+    end
+end
+
+local function onPlayerRemoving(player: Player)
+    if characterAddedConnections[player] then
+        characterAddedConnections[player]:Disconnect()
+        characterAddedConnections[player] = nil
+    end
+    if Drawing then
+        local line = getTracer(tostring(player.UserId))
+        if line then line.Visible = false end
+        if skeletonCache[player] then
+            for _, l in pairs(skeletonCache[player]) do
+                if l then l.Visible = false end
+            end
+            skeletonCache[player] = nil
+        end
+    end
+    
+    if ESP.MurdererHighlight or ESP.SheriffHighlight or ESP.InnocentHighlight
+    or ESP.MurdererTracer or ESP.SheriffTracer or ESP.InnocentTracer
+    or ESP.MurdererSkeleton or ESP.SheriffSkeleton or ESP.InnocentSkeleton then
+        startESP()
+    end
+end
+
+local function updateFOV()
+    local cam = Workspace.CurrentCamera
+    if not cam then return end
+    
+    local targetFOV = Config.FOVEnabled and Config.FOVValue or 70
+    
+    if cam.FieldOfView ~= targetFOV then
+        local tweenInfo = TweenInfo.new(0.2, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
+        local tween = TweenService:Create(cam, tweenInfo, {FieldOfView = targetFOV})
+        tween:Play()
+    end
+end
+
+local function setupFOV()
+    if fovConnection then
+        fovConnection:Disconnect()
+        fovConnection = nil
+    end
+    
+    fovConnection = RunService.RenderStepped:Connect(function()
+        updateFOV()
+    end)
+    maid:add(fovConnection)
+end
+
+local function setupDezoom()
+    if Config.DezoomEnabled then
+        LocalPlayer.CameraMinZoomDistance = 1
+        LocalPlayer.CameraMaxZoomDistance = Config.DezoomValue
+    else
+        LocalPlayer.CameraMinZoomDistance = 0.5
+        LocalPlayer.CameraMaxZoomDistance = 10
+    end
+end
+
+local function forceRespawn()
+    local char = LocalPlayer.Character
+    if char then
+        local hum = char:FindFirstChildOfClass("Humanoid")
+        if hum then
+            hum.Health = 0
+        end
+    end
+end
+
+local function teleportTo(position: Vector3)
+    local char = LocalPlayer.Character
+    if char and char:FindFirstChild("HumanoidRootPart") then
+        char:PivotTo(CFrame.new(position))
+    end
+end
+
+local function findSpawnPart()
+    for _, child in ipairs(Workspace:GetChildren()) do
+        local spawnsModel = child:FindFirstChild("Spawns")
+        if spawnsModel then
+            local spawnPart = spawnsModel:FindFirstChild("Spawn")
+            if spawnPart and spawnPart:IsA("BasePart") then
+                return spawnPart
+            end
+        end
+    end
+    return nil
+end
+
+local function setupCharacter(char: Model): ()
+    if currentCharacter == char then return end
+    
+    if characterMaid then
+        characterMaid:cleanup()
+        characterMaid = nil
+    end
+
+    currentCharacter = char
+    characterMaid = Maid.new()
+
+    local humanoid = char:FindFirstChildOfClass("Humanoid")
+    if not humanoid then
+        task.wait(0.5)
+        humanoid = char:FindFirstChildOfClass("Humanoid")
+        if not humanoid then return end
+    end
+
+    setWalkSpeed(Config.WalkSpeedEnabled, Config.WalkSpeed)
+    setJumpPower(Config.JumpPowerEnabled, Config.JumpPower)
+    setGravity(Config.GravityEnabled, Config.Gravity)
+
+    if Config.NoclipEnabled then
+        setNoclip(true)
+    end
+
+    if Config.FlyEnabled then
+        setFly(true, Config.FlyMethod, Config.FlySpeed)
+    end
+
+    setupInfiniteJump(Config.InfiniteJump)
+    setupSpamJump(Config.SpamJump)
+    
+    task.wait(0.5)
+    if ESP.MurdererHighlight or ESP.SheriffHighlight or ESP.InnocentHighlight
+    or ESP.MurdererTracer or ESP.SheriffTracer or ESP.InnocentTracer
+    or ESP.MurdererSkeleton or ESP.SheriffSkeleton or ESP.InnocentSkeleton then
+        startESP()
+    end
+
+    characterMaid:add(humanoid.Died:Connect(function()
+        clearESP()
+        
+        if characterMaid then
+            characterMaid:cleanup()
+            characterMaid = nil
+        end
+        cleanFly()
+        if infiniteJumpConnection then
+            infiniteJumpConnection:Disconnect()
+            infiniteJumpConnection = nil
+        end
+        if spamJumpConnection then
+            spamJumpConnection:Disconnect()
+            spamJumpConnection = nil
+        end
+        if noclipConnection then
+            noclipConnection:Disconnect()
+            noclipConnection = nil
+        end
+        currentCharacter = nil
+        
+        if Config.InstantRespawn then
+            task.wait(0.5)
+            forceRespawn()
+        end
+    end))
+end
+
+local function findGunDrop(): BasePart?
+    for _, model in ipairs(Workspace:GetChildren()) do
+        if model:IsA("Model") then
+            local gunDrop = model:FindFirstChild("GunDrop")
+            if gunDrop and gunDrop:IsA("BasePart") then
+                return gunDrop
+            end
+        end
+    end
+    return nil
+end
+
+local function grabGunTP()
+    local gun = findGunDrop()
+    if not gun then return false end
+    local char = LocalPlayer.Character
+    if not char then return false end
+    local root = char:FindFirstChild("HumanoidRootPart")
+    if not root then return false end
+    local origPos = root.Position
+    root.CFrame = gun.CFrame
+    task.wait(0.05)
+    if root and root.Parent then
+        root.CFrame = CFrame.new(origPos)
+    end
+    return true
+end
+
+local function grabGunGrab()
+    local gun = findGunDrop()
+    if not gun then return false end
+    local char = LocalPlayer.Character
+    if not char then return false end
+    local root = char:FindFirstChild("HumanoidRootPart")
+    if not root then return false end
+    gun.CFrame = root.CFrame * CFrame.new(0, 1.5, 0)
+    return true
+end
+
+local function executeGrab()
+    local method = Config.GrabMethod
+    if method ~= "TP to Gun" and method ~= "Grab" then
+        method = "Grab"
+    end
+    if method == "TP to Gun" then
+        return grabGunTP()
+    else
+        return grabGunGrab()
+    end
+end
+
+local function playerHasGun(): boolean
+    local char = LocalPlayer.Character
+    if char then
+        if hasItemEquipped(char, "Gun") then
+            return true
+        end
+    end
+    if hasItemInBackpack(LocalPlayer, "Gun") then
+        return true
+    end
+    return false
+end
+
+local function startAutoGrab()
+    if autoGrabConnection then
+        autoGrabConnection:Disconnect()
+        autoGrabConnection = nil
+    end
+    autoGrabRunning = false
+
+    if not Config.AutoGrabGun then return end
+
+    autoGrabRunning = true
+    autoGrabConnection = RunService.Heartbeat:Connect(function()
+        if not autoGrabRunning then return end
+        local currentTime = tick()
+        if currentTime - lastGrabTime < 1 then return end
+        lastGrabTime = currentTime
+
+        if not findGunDrop() then return end
+        executeGrab()
+    end)
+    maid:add(autoGrabConnection)
+end
+
+local function stopAutoGrab()
+    if autoGrabConnection then
+        autoGrabConnection:Disconnect()
+        autoGrabConnection = nil
+    end
+    autoGrabRunning = false
+end
+
+local function handleGrabAction()
+    local gun = findGunDrop()
+    if not gun then
+        pcall(function()
+            if WindUI and WindUI.Notify then
+                WindUI:Notify({ Title = "Grab", Content = "Wait for the sheriff to die first", Duration = 3 })
+            end
+        end)
+        return
+    end
+    executeGrab()
+    task.wait(0.5)
+    if playerHasGun() then
+        pcall(function()
+            if WindUI and WindUI.Notify then
+                WindUI:Notify({ Title = "Grab", Content = "Gun grabbed successfully!", Duration = 2 })
+            end
+        end)
+    else
+        pcall(function()
+            if WindUI and WindUI.Notify then
+                WindUI:Notify({ Title = "Grab", Content = "Failed :(", Duration = 2 })
+            end
+        end)
+    end
+end
+
+local function getKnifeDirection(knife: BasePart): Vector3?
+    local dir = knife:GetAttribute("Direction")
+    if type(dir) == "Vector3" then
+        return dir
+    end
+    return nil
+end
+
+local function isInKnifeList(knife: BasePart): boolean
+    for _, k in ipairs(dodgeKnifeList) do
+        if k == knife then
+            return true
+        end
+    end
+    return false
+end
+
+local function removeKnifeFromList(knife: BasePart)
+    for i, k in ipairs(dodgeKnifeList) do
+        if k == knife then
+            table.remove(dodgeKnifeList, i)
+            break
+        end
+    end
+    if Config.DodgeMethod == "SafePlace" and isInSafePlace and #dodgeKnifeList == 0 then
+        returnFromSafePlace()
+    end
+end
+
+local function performSafePlace()
+    if isInSafePlace then return end
+    local char = LocalPlayer.Character
+    if not char then return end
+    local root = char:FindFirstChild("HumanoidRootPart")
+    if not root then return end
+    safePlaceOriginalPos = root.Position
+    local safePos = Vector3.new(root.Position.X, 1000, root.Position.Z)
+    root.CFrame = CFrame.new(safePos)
+    isInSafePlace = true
+end
+
+local function returnFromSafePlace()
+    if not isInSafePlace then return end
+    local char = LocalPlayer.Character
+    if not char then return end
+    local root = char:FindFirstChild("HumanoidRootPart")
+    if not root then return end
+    if safePlaceOriginalPos then
+        root.CFrame = CFrame.new(safePlaceOriginalPos)
+        safePlaceOriginalPos = nil
+    end
+    isInSafePlace = false
+end
+
+local function performDodge(knife: BasePart)
+    local char = LocalPlayer.Character
+    if not char then return end
+    local root = char:FindFirstChild("HumanoidRootPart")
+    if not root then return end
+    local dir = getKnifeDirection(knife)
+    if not dir then return end
+    local up = Vector3.new(0, 1, 0)
+    local lateral = dir:Cross(up)
+    if lateral.Magnitude < 0.01 then
+        lateral = Vector3.new(1, 0, 0)
+    end
+    lateral = lateral.Unit
+    local speed = 30
+    local velocity = lateral * speed + Vector3.new(0, 10, 0)
+    root.Velocity = velocity
+end
+
+local function handleKnifeAdded(knife: BasePart)
+    if not Config.DodgeKnifeThrow then return end
+    if not knife:IsA("BasePart") or knife.Name ~= "KnifeVisual" then return end
+    if isInKnifeList(knife) then return end
+    
+    table.insert(dodgeKnifeList, knife)
+    
+    local destroyConn
+    destroyConn = knife.AncestryChanged:Connect(function()
+        if not knife.Parent then
+            destroyConn:Disconnect()
+            removeKnifeFromList(knife)
+        end
+    end)
+    
+    if Config.DodgeMethod == "SafePlace" then
+        performSafePlace()
+    elseif Config.DodgeMethod == "Dodge" then
+        performDodge(knife)
+    end
+end
+
+local function startDodge()
+    if dodgeDescendantAddedConn then
+        dodgeDescendantAddedConn:Disconnect()
+        dodgeDescendantAddedConn = nil
+    end
+    
+    dodgeActive = false
+    
+    if not Config.DodgeKnifeThrow then return end
+    
+    dodgeActive = true
+    table.clear(dodgeKnifeList)
+    
+    dodgeDescendantAddedConn = Workspace.DescendantAdded:Connect(function(child)
+        if child:IsA("BasePart") and child.Name == "KnifeVisual" then
+            handleKnifeAdded(child)
+        end
+    end)
+    maid:add(dodgeDescendantAddedConn)
+    
+    for _, child in ipairs(Workspace:GetDescendants()) do
+        if child:IsA("BasePart") and child.Name == "KnifeVisual" then
+            handleKnifeAdded(child)
+        end
+    end
+end
+
+local function stopDodge()
+    if dodgeDescendantAddedConn then
+        dodgeDescendantAddedConn:Disconnect()
+        dodgeDescendantAddedConn = nil
+    end
+    dodgeActive = false
+    if isInSafePlace then
+        returnFromSafePlace()
+    end
+    table.clear(dodgeKnifeList)
+end
+
+local WindUI: any = nil
+local mainWindow: any = nil
+
+local function loadWindUI(): boolean
+    local success, result = pcall(function()
+        return loadstring(game:HttpGet("https://github.com/Footagesus/WindUI/releases/latest/download/main.lua"))()
+    end)
+
+    if not success then
+        warn("WindUI load error:", result)
+        StarterGui:SetCore("SendNotification", {
+            Title = "WindUI Error",
+            Text = "Impossible de charger WindUI. Code: " .. tostring(result),
+            Duration = 10,
+        })
+        return false
+    end
+
+    if not result then
+        warn("WindUI returned nil")
+        return false
+    end
+
+    WindUI = result
+    return true
+end
+
+function buildESPUI()
+    if not WindUI or not mainWindow then return end
+    
+    local espTab = mainWindow:Tab({ Title = "ESP", Icon = "eye" })
+    
+    local settingsSection = espTab:Section({
+        Title = "ESP Settings",
+        Opened = true,
+        Icon = "wrench"
+    })
+    
+    settingsSection:Slider({
+        Title = "Max Distance",
+        Value = { Min = 0, Max = 500, Default = 0 },
+        Rounding = 0,
+        Enabled = true,
+        Callback = function(value: number)
+            ESP.MaxDistance = value
+            startESP()
+        end
+    })
+    
+    settingsSection:Slider({
+        Title = "Highlight Fill Transparency",
+        Value = { Min = 0, Max = 100, Default = 70 },
+        Rounding = 0,
+        Enabled = true,
+        Callback = function(value: number)
+            Config.HLFillTrans = value / 100
+            startESP()
+        end
+    })
+    
+    settingsSection:Slider({
+        Title = "Highlight Outline Transparency",
+        Value = { Min = 0, Max = 100, Default = 65 },
+        Rounding = 0,
+        Enabled = true,
+        Callback = function(value: number)
+            Config.HLOutlineTrans = value / 100
+            startESP()
+        end
+    })
+    
+    settingsSection:Slider({
+        Title = "Skeleton Thickness",
+        Value = { Min = 1, Max = 5, Default = 1.5 },
+        Rounding = 1,
+        Enabled = true,
+        Callback = function(value: number)
+            ESP.SkeletonThickness = value
+            startESP()
+        end
+    })
+    
+    settingsSection:Divider()
+    
+    settingsSection:Colorpicker({
+        Title = "Murderer Color",
+        Default = Color3.fromRGB(255, 0, 0),
+        Callback = function(color: Color3)
+            ESP.MurdererColor = color
+            startESP()
+        end
+    })
+    
+    settingsSection:Colorpicker({
+        Title = "Sheriff Color",
+        Default = Color3.fromRGB(0, 100, 255),
+        Callback = function(color: Color3)
+            ESP.SheriffColor = color
+            startESP()
+        end
+    })
+    
+    settingsSection:Colorpicker({
+        Title = "Innocent Color",
+        Default = Color3.fromRGB(0, 255, 0),
+        Callback = function(color: Color3)
+            ESP.InnocentColor = color
+            startESP()
+        end
+    })
+    
+    local murdererSection = espTab:Section({
+        Title = "Murderer ESP",
+        Opened = true,
+        Icon = "sword"
+    })
+    
+    murdererSection:Toggle({
+        Title = "Highlight Murderer",
+        Default = false,
+        Callback = function(value: boolean)
+            ESP.MurdererHighlight = value
+            startESP()
+        end
+    })
+    
+    murdererSection:Toggle({
+        Title = "Tracer Murderer",
+        Default = false,
+        Callback = function(value: boolean)
+            ESP.MurdererTracer = value
+            startESP()
+        end
+    })
+    
+    murdererSection:Toggle({
+        Title = "Skeleton Murderer",
+        Default = false,
+        Callback = function(value: boolean)
+            ESP.MurdererSkeleton = value
+            startESP()
+        end
+    })
+    
+    local sheriffSection = espTab:Section({
+        Title = "Sheriff ESP",
+        Opened = true,
+        Icon = "shield"
+    })
+    
+    sheriffSection:Toggle({
+        Title = "Highlight Sheriff",
+        Default = false,
+        Callback = function(value: boolean)
+            ESP.SheriffHighlight = value
+            startESP()
+        end
+    })
+    
+    sheriffSection:Toggle({
+        Title = "Tracer Sheriff",
+        Default = false,
+        Callback = function(value: boolean)
+            ESP.SheriffTracer = value
+            startESP()
+        end
+    })
+    
+    sheriffSection:Toggle({
+        Title = "Skeleton Sheriff",
+        Default = false,
+        Callback = function(value: boolean)
+            ESP.SheriffSkeleton = value
+            startESP()
+        end
+    })
+    
+    local innocentSection = espTab:Section({
+        Title = "Innocent ESP",
+        Opened = true,
+        Icon = "user"
+    })
+    
+    innocentSection:Toggle({
+        Title = "Highlight Innocent",
+        Default = false,
+        Callback = function(value: boolean)
+            ESP.InnocentHighlight = value
+            startESP()
+        end
+    })
+    
+    innocentSection:Toggle({
+        Title = "Tracer Innocent",
+        Default = false,
+        Callback = function(value: boolean)
+            ESP.InnocentTracer = value
+            startESP()
+        end
+    })
+    
+    innocentSection:Toggle({
+        Title = "Skeleton Innocent",
+        Default = false,
+        Callback = function(value: boolean)
+            ESP.InnocentSkeleton = value
+            startESP()
+        end
+    })
+end
+
+function buildTeleportUI()
+    if not WindUI or not mainWindow then return end
+    
+    local teleportTab = mainWindow:Tab({ Title = "Teleport", Icon = "arrow-right-left" })
+    
+    local mapSection = teleportTab:Section({
+        Title = "Map Teleport",
+        Opened = true,
+        Icon = "map"
+    })
+
+    mapSection:Button({
+        Title = "TP to lobby",
+        Callback = function()
+            teleportTo(Vector3.new(0, -66, -40))
+        end
+    })
+
+    mapSection:Button({
+        Title = "TP to voting room",
+        Callback = function()
+            teleportTo(Vector3.new(0, -63, -84))
+        end
+    })
+
+    mapSection:Button({
+        Title = "TP to fountain",
+        Callback = function()
+            teleportTo(Vector3.new(0, -54, -14))
+        end
+    })
+
+    mapSection:Divider()
+
+    mapSection:Button({
+        Title = "TP to map",
+        Callback = function()
+            local spawnPart = findSpawnPart()
+            if spawnPart then
+                teleportTo(spawnPart.Position)
+            else
+                pcall(function()
+                    if WindUI and WindUI.Notify then
+                        WindUI:Notify({
+                            Title = "Error",
+                            Content = "Spawn part not found",
+                            Duration = 3
+                        })
+                    end
+                end)
+            end
+        end
+    })
+
+    local tpPlayerSection = teleportTab:Section({
+        Title = "Teleport to player",
+        Opened = true,
+        Icon = "user-plus"
+    })
+    
+    local targetInput = nil
+    
+    targetInput = tpPlayerSection:Input({
+        Title = "Target Name",
+        Default = "",
+        Placeholder = "Enter player name",
+        Callback = function(value)
+        end
+    })
+    
+    tpPlayerSection:Button({
+        Title = "TP to Target",
+        Callback = function()
+            local targetName = targetInput.Value or ""
+            if targetName == "" then
+                pcall(function()
+                    if WindUI and WindUI.Notify then
+                        WindUI:Notify({ Title = "Error", Content = "Select a target first", Duration = 3 })
+                    end
+                end)
+                return
+            end
+            local target = Players:FindFirstChild(targetName)
+            if target and target.Character and target.Character:FindFirstChild("HumanoidRootPart") then
+                teleportTo(target.Character.HumanoidRootPart.Position)
+            else
+                pcall(function()
+                    if WindUI and WindUI.Notify then
+                        WindUI:Notify({ Title = "Error", Content = "Target not found or invalid", Duration = 3 })
+                    end
+                end)
+            end
+        end
+    })
+    
+    tpPlayerSection:Divider()
+    
+    tpPlayerSection:Button({
+        Title = "TP to random Innocent",
+        Callback = function()
+            local innocents = {}
+            for _, p in ipairs(Players:GetPlayers()) do
+                if p ~= LocalPlayer then
+                    local role, _ = getPlayerRole(p)
+                    if role == "Innocent" then
+                        table.insert(innocents, p)
+                    end
+                end
+            end
+            if #innocents > 0 then
+                local target = innocents[math.random(1, #innocents)]
+                if target.Character and target.Character:FindFirstChild("HumanoidRootPart") then
+                    teleportTo(target.Character.HumanoidRootPart.Position)
+                end
+            else
+                pcall(function()
+                    if WindUI and WindUI.Notify then
+                        WindUI:Notify({ Title = "Info", Content = "No innocents found", Duration = 3 })
+                    end
+                end)
+            end
+        end
+    })
+    
+    tpPlayerSection:Button({
+        Title = "TP to sheriff",
+        Callback = function()
+            local sheriffs = {}
+            for _, p in ipairs(Players:GetPlayers()) do
+                if p ~= LocalPlayer then
+                    local role, _ = getPlayerRole(p)
+                    if role == "Sheriff" then
+                        table.insert(sheriffs, p)
+                    end
+                end
+            end
+            if #sheriffs > 0 then
+                local target = sheriffs[math.random(1, #sheriffs)]
+                if target.Character and target.Character:FindFirstChild("HumanoidRootPart") then
+                    teleportTo(target.Character.HumanoidRootPart.Position)
+                end
+            else
+                pcall(function()
+                    if WindUI and WindUI.Notify then
+                        WindUI:Notify({ Title = "Info", Content = "Sheriff not found", Duration = 3 })
+                    end
+                end)
+            end
+        end
+    })
+    
+    tpPlayerSection:Button({
+        Title = "TP to murder",
+        Callback = function()
+            local murderers = {}
+            for _, p in ipairs(Players:GetPlayers()) do
+                if p ~= LocalPlayer then
+                    local role, _ = getPlayerRole(p)
+                    if role == "Murderer" then
+                        table.insert(murderers, p)
+                    end
+                end
+            end
+            if #murderers > 0 then
+                local target = murderers[math.random(1, #murderers)]
+                if target.Character and target.Character:FindFirstChild("HumanoidRootPart") then
+                    teleportTo(target.Character.HumanoidRootPart.Position)
+                end
+            else
+                pcall(function()
+                    if WindUI and WindUI.Notify then
+                        WindUI:Notify({ Title = "Info", Content = "Murderer not found", Duration = 3 })
+                    end
+                end)
+            end
+        end
+    })
+end
+
+local function buildUI(): ()
+    if not WindUI then return end
+
+    WindUI:AddTheme({
+        Name = "Amnethy",
+        Accent = Color3.fromHex("#1A1A1A"),
+        Background = Color3.fromHex("#0D0D0D"),
+        Outline = Color3.fromHex("#333333"),
+        Text = Color3.fromHex("#FFFFFF"),
+        Placeholder = Color3.fromHex("#666666"),
+        Button = Color3.fromHex("#1A1A1A"),
+        Icon = Color3.fromHex("#FFFFFF")
+    })
+
+    WindUI:SetTheme("Amnethy")
+
+    mainWindow = WindUI:CreateWindow({
+        Title = "Sentinel Script - MM2",
+        Author = "x4tmq",
+        Icon = "door-open",
+        Folder = "Sentinel",
+        ScrollBarEnabled = true,
+        Size = UDim2.fromOffset(250, 150),
+        ToggleKey = Enum.KeyCode.K,
+        Theme = "Amnethy",
+        HideSearchBar = false,
+        Resizable = true,
+        Transparent = true,
+        BackgroundImageTransparency = 0.5,
+        User = {
+            Enabled = true,
+            Anonymous = false,
+        }
+    })
+
+    pcall(function()
+        if mainWindow then
+            mainWindow:Tag({
+                Title = "v1.00.00",
+                Icon = "shield-check",
+                Color = Color3.fromHex("#30ff6a"),
+                Radius = 13
+            })
+        end
+    end)
+
+    local playerTab = mainWindow:Tab({ Title = "Player", Icon = "user" })
+
+    do
+        local section = playerTab:Section({
+            Title = "WalkSpeed",
+            Opened = true,
+            Icon = "sport-shoe"
+        })
+
+        section:Toggle({
+            Title = "Enable WalkSpeed",
+            Default = false,
+            Callback = function(value: boolean)
+                Config.WalkSpeedEnabled = value
+                setWalkSpeed(value, Config.WalkSpeed)
+            end
+        })
+
+        section:Slider({
+            Title = "Speed",
+            Value = { Min = 1, Max = 50, Default = 16 },
+            Rounding = 0,
+            Enabled = true,
+            Callback = function(value: number)
+                Config.WalkSpeed = value
+                if Config.WalkSpeedEnabled then
+                    setWalkSpeed(true, value)
+                end
+            end
+        })
+    end
+
+    do
+        local section = playerTab:Section({
+            Title = "JumpPower",
+            Opened = true,
+            Icon = "plane-landing"
+        })
+
+        section:Toggle({
+            Title = "Enable JumpPower",
+            Default = false,
+            Callback = function(value: boolean)
+                Config.JumpPowerEnabled = value
+                setJumpPower(value, Config.JumpPower)
+            end
+        })
+
+        section:Slider({
+            Title = "Power",
+            Value = { Min = 5, Max = 75, Default = 50 },
+            Rounding = 0,
+            Enabled = true,
+            Callback = function(value: number)
+                Config.JumpPower = value
+                if Config.JumpPowerEnabled then
+                    setJumpPower(true, value)
+                end
+            end
+        })
+
+        section:Divider()
+
+        section:Toggle({
+            Title = "Infinite Jump",
+            Default = false,
+            Callback = function(value: boolean)
+                Config.InfiniteJump = value
+                setupInfiniteJump(value)
+            end
+        })
+
+        section:Toggle({
+            Title = "Spam Jump",
+            Default = false,
+            Callback = function(value: boolean)
+                Config.SpamJump = value
+                setupSpamJump(value)
+            end
+        })
+    end
+
+    do
+        local section = playerTab:Section({
+            Title = "Gravity",
+            Opened = true,
+            Icon = "arrow-down"
+        })
+
+        section:Toggle({
+            Title = "Enable Custom Gravity",
+            Default = false,
+            Callback = function(value: boolean)
+                Config.GravityEnabled = value
+                setGravity(value, Config.Gravity)
+            end
+        })
+
+        section:Slider({
+            Title = "Gravity Value",
+            Value = { Min = 0, Max = 500, Default = 196.2 },
+            Rounding = 1,
+            Enabled = true,
+            Callback = function(value: number)
+                Config.Gravity = value
+                if Config.GravityEnabled then
+                    setGravity(true, value)
+                end
+            end
+        })
+    end
+
+    do
+        local section = playerTab:Section({
+            Title = "Fly",
+            Opened = true,
+            Icon = "plane"
+        })
+
+        section:Toggle({
+            Title = "Enable Fly",
+            Default = false,
+            Callback = function(value: boolean)
+                Config.FlyEnabled = value
+                if value then
+                    setFly(true, Config.FlyMethod, Config.FlySpeed)
+                else
+                    cleanFly()
+                end
+            end
+        })
+
+        section:Dropdown({
+            Title = "Fly Method",
+            Values = { "CFrame", "BodyVelocity + Gyro", "Seat" },
+            Default = "BodyVelocity + Gyro",
+            Callback = function(value: string)
+                Config.FlyMethod = value
+                if Config.FlyEnabled then
+                    setFly(true, value, Config.FlySpeed)
+                end
+            end
+        })
+
+        section:Slider({
+            Title = "Fly Speed",
+            Value = { Min = 1, Max = 100, Default = 50 },
+            Rounding = 0,
+            Enabled = true,
+            Callback = function(value: number)
+                Config.FlySpeed = value
+                if Config.FlyEnabled then
+                    setupFlyMovement()
+                end
+            end
+        })
+    end
+
+    do
+        local section = playerTab:Section({
+            Title = "Noclip",
+            Opened = true,
+            Icon = "ghost"
+        })
+
+        section:Toggle({
+            Title = "Enable Noclip",
+            Default = false,
+            Callback = function(value: boolean)
+                Config.NoclipEnabled = value
+                setNoclip(value)
+            end
+        })
+    end
+
+    do
+        local healthSection = playerTab:Section({
+            Title = "Character Health",
+            Opened = true,
+            Icon = "heart"
+        })
+
+        healthSection:Button({
+            Title = "Respawn",
+            Callback = function()
+                forceRespawn()
+            end
+        })
+
+        local instantRespawnToggle = healthSection:Toggle({
+            Title = "Instant Respawn",
+            Default = false,
+            Callback = function(value: boolean)
+                Config.InstantRespawn = value
+            end
+        })
+        instantRespawnToggle:Lock()
+    end
+
+    do
+        local cameraSection = playerTab:Section({
+            Title = "Camera",
+            Opened = true,
+            Icon = "camera"
+        })
+        
+        cameraSection:Toggle({
+            Title = "FOV",
+            Default = false,
+            Callback = function(value: boolean)
+                Config.FOVEnabled = value
+                updateFOV()
+            end
+        })
+        
+        cameraSection:Slider({
+            Title = "FOV Value",
+            Value = { Min = 1, Max = 120, Default = 70 },
+            Rounding = 0,
+            Enabled = true,
+            Callback = function(value: number)
+                Config.FOVValue = value
+                if Config.FOVEnabled then
+                    updateFOV()
+                end
+            end
+        })
+        
+        cameraSection:Divider()
+        
+        cameraSection:Toggle({
+            Title = "Max Camera Dezoom",
+            Default = false,
+            Callback = function(value: boolean)
+                Config.DezoomEnabled = value
+                setupDezoom()
+            end
+        })
+        
+        cameraSection:Slider({
+            Title = "Dezoom Distance",
+            Value = { Min = 0, Max = 100, Default = 50 },
+            Rounding = 0,
+            Enabled = true,
+            Callback = function(value: number)
+                Config.DezoomValue = value
+                if Config.DezoomEnabled then
+                    setupDezoom()
+                end
+            end
+        })
+    end
+
+    buildESPUI()
+    buildTeleportUI()
+
+    local combatTab = mainWindow:Tab({ Title = "Combat", Icon = "sword" })
+
+    do
+        local innocentSection = combatTab:Section({
+            Title = "Innocent",
+            Opened = true,
+            Icon = "user"
+        })
+
+        innocentSection:Toggle({
+            Title = "Auto Grab Gun",
+            Default = false,
+            Callback = function(value: boolean)
+                Config.AutoGrabGun = value
+                if value then
+                    startAutoGrab()
+                else
+                    stopAutoGrab()
+                end
+            end
+        })
+
+        innocentSection:Dropdown({
+            Title = "Grab Method",
+            Values = { "TP to Gun", "Grab" },
+            Default = "TP to Gun",
+            Callback = function(value: string)
+                Config.GrabMethod = value
+                if Config.AutoGrabGun then
+                    stopAutoGrab()
+                    startAutoGrab()
+                end
+            end
+        })
+
+        innocentSection:Button({
+            Title = "Grab Gun",
+            Callback = function()
+                handleGrabAction()
+            end
+        })
+
+        innocentSection:Keybind({
+            Title = "Grab Keybind",
+            Value = Config.GrabKeybind,
+            Callback = function(key: string)
+                Config.GrabKeybind = key
+            end
+        })
+
+        innocentSection:Divider()
+
+        innocentSection:Toggle({
+            Title = "Dodge Knife Throw",
+            Default = false,
+            Callback = function(value: boolean)
+                Config.DodgeKnifeThrow = value
+                if value then
+                    startDodge()
+                else
+                    stopDodge()
+                end
+            end
+        })
+
+        innocentSection:Dropdown({
+            Title = "Dodge Method",
+            Values = { "SafePlace", "Dodge" },
+            Default = "SafePlace",
+            Callback = function(value: string)
+                Config.DodgeMethod = value
+                if Config.DodgeKnifeThrow then
+                    stopDodge()
+                    startDodge()
+                end
+            end
+        })
+    end
+
+    local trollTab = mainWindow:Tab({ Title = "Troll [...]", Icon = "ghost" })
+    trollTab:Section({
+        Title = "Fling",
+        Opened = true,
+        Icon = "plane"
+    })
+
+    local autoFarmTab = mainWindow:Tab({ Title = "Auto Farm [...]", Icon = "hand-coins" })
+    autoFarmTab:Section({
+        Title = "Auto Farm",
+        Icon = "bitcoin"
+    })
+end
+
+local function initialize(): ()
+    if not loadWindUI() then
+        warn("[Sentinel] Échec du chargement de WindUI.")
+        return
+    end
+
+    buildUI()
+
+    if mainWindow then
+        mainWindow.Visible = true
+    end
+
+    pcall(function()
+        if mainWindow and WindUI then
+            mainWindow:SelectTab(1)
+            WindUI:Notify({ Title = "News", Content = "Welcome to v1", Duration = 5 })
+            WindUI:Notify({ Title = "Sentinel v1.00.00", Content = "Script Loaded successfully,\n Welcome, user.", Duration = 5 })
+        end
+    end)
+
+    playerAddedConnection = Players.PlayerAdded:Connect(onPlayerAdded)
+    maid:add(playerAddedConnection)
+    
+    playerRemovingConnection = Players.PlayerRemoving:Connect(onPlayerRemoving)
+    maid:add(playerRemovingConnection)
+
+    for _, player in ipairs(Players:GetPlayers()) do
+        if player ~= LocalPlayer then
+            onPlayerAdded(player)
+        end
+    end
+
+    local char = LocalPlayer.Character
+    if char then
+        setupCharacter(char)
+    end
+
+    local charAddedConn = LocalPlayer.CharacterAdded:Connect(setupCharacter)
+    maid:add(charAddedConn)
+    
+    setupFOV()
+    
+    UserInputService.InputBegan:Connect(function(input, gameProcessed)
+        if gameProcessed then return end
+        if input.KeyCode == Enum.KeyCode[Config.GrabKeybind] then
+            if input.UserInputType == Enum.UserInputType.Keyboard then
+                handleGrabAction()
+            end
+        end
+        if input.KeyCode == Enum.KeyCode.K and mainWindow then
+            if not mainWindow.Visible and firstHide then
+                firstHide = false
+                pcall(function()
+                    if WindUI then
+                        WindUI:Notify({ Title = "Keybind", Content = "Press K to toggle interface", Duration = 3 })
+                    end
+                end)
+            end
+        end
+    end)
+end
+
+task.spawn(initialize)
