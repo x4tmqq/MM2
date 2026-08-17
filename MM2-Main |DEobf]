@@ -134,10 +134,9 @@ local infiniteJumpConnection = nil
 local spamJumpConnection = nil
 local noclipConnection = nil
 
+-- Variables de vol
 local flyBV = nil
 local flyBG = nil
-local flySeat = nil
-local flyWeld = nil
 local flyActive = false
 local flyConnection = nil
 
@@ -693,9 +692,116 @@ end
 
 -- ============ FIN ESP CORRIGÉ ============
 
--- Le reste des fonctions (WalkSpeed, Fly, Combat, AutoFarm, etc.) reste inchangé
--- Je les reproduis intégralement pour que le script soit complet
+-- ============ FLY CORRIGÉ POUR MOBILE ============
 
+local function cleanFly()
+    if flyBV then flyBV:Destroy(); flyBV = nil end
+    if flyBG then flyBG:Destroy(); flyBG = nil end
+    if flyConnection then flyConnection:Disconnect(); flyConnection = nil end
+
+    -- On restaure le humanoid si nécessaire
+    local char = LocalPlayer.Character
+    if char then
+        local hum = char:FindFirstChildOfClass("Humanoid")
+        if hum then
+            hum.PlatformStand = false
+        end
+    end
+    flyActive = false
+end
+
+local function setupFlyMovement()
+    if flyConnection then
+        flyConnection:Disconnect()
+        flyConnection = nil
+    end
+
+    if not flyActive then return end
+
+    flyConnection = RunService.RenderStepped:Connect(function(dt)
+        if not flyActive then return end
+        local c = LocalPlayer.Character
+        if not c then return end
+        local root = c:FindFirstChild("HumanoidRootPart")
+        if not root then return end
+
+        local cam = Workspace.CurrentCamera
+        if not cam then return end
+
+        local move = Vector3.new()
+        -- Touches WASD / flèches / joystick virtuel (IsKeyDown fonctionne sur mobile)
+        if UserInputService:IsKeyDown(Enum.KeyCode.W) then
+            move = move + cam.CFrame.LookVector
+        end
+        if UserInputService:IsKeyDown(Enum.KeyCode.S) then
+            move = move - cam.CFrame.LookVector
+        end
+        if UserInputService:IsKeyDown(Enum.KeyCode.A) then
+            move = move - cam.CFrame.RightVector
+        end
+        if UserInputService:IsKeyDown(Enum.KeyCode.D) then
+            move = move + cam.CFrame.RightVector
+        end
+        if UserInputService:IsKeyDown(Enum.KeyCode.Space) then
+            move = move + Vector3.new(0, 1, 0)
+        end
+        if UserInputService:IsKeyDown(Enum.KeyCode.LeftShift) then
+            move = move - Vector3.new(0, 1, 0)
+        end
+
+        if move.Magnitude > 0 then
+            move = move.Unit
+        end
+
+        local method = Config.FlyMethod
+        local speed = Config.FlySpeed
+
+        if method == "CFrame" then
+            root.CFrame = root.CFrame + move * speed * dt
+        elseif method == "BodyVelocity + Gyro" then
+            if flyBV and flyBG then
+                flyBG.CFrame = cam.CFrame
+                flyBV.Velocity = move * speed
+            end
+        end
+    end)
+    maid:add(flyConnection)
+end
+
+local function setFly(enabled, method, speed)
+    local char = LocalPlayer.Character
+    if not char then return end
+    local hrp = char:FindFirstChild("HumanoidRootPart")
+    local hum = char:FindFirstChildOfClass("Humanoid")
+    if not hrp or not hum then return end
+
+    cleanFly()
+
+    if not enabled then
+        flyActive = false
+        return
+    end
+
+    flyActive = true
+
+    if method == "CFrame" then
+        hum.PlatformStand = true
+    elseif method == "BodyVelocity + Gyro" then
+        flyBV = Instance.new("BodyVelocity")
+        flyBV.MaxForce = Vector3.new(1e6, 1e6, 1e6)
+        flyBV.Parent = hrp
+
+        flyBG = Instance.new("BodyGyro")
+        flyBG.MaxTorque = Vector3.new(1e6, 1e6, 1e6)
+        flyBG.Parent = hrp
+    end
+
+    setupFlyMovement()
+end
+
+-- ============ FIN FLY ============
+
+-- Le reste des fonctions (WalkSpeed, Jump, etc.) reste inchangé
 local function setWalkSpeed(enabled, speed)
     local char = LocalPlayer.Character
     if not char then return end
@@ -745,151 +851,6 @@ local function setNoclip(enabled)
             end
         end
     end
-end
-
-local function cleanFly()
-    if flyBV then flyBV:Destroy(); flyBV = nil end
-    if flyBG then flyBG:Destroy(); flyBG = nil end
-    if flySeat then flySeat:Destroy(); flySeat = nil end
-    if flyWeld then flyWeld:Destroy(); flyWeld = nil end
-    if flyConnection then flyConnection:Disconnect(); flyConnection = nil end
-
-    if infiniteJumpConnection then
-        infiniteJumpConnection:Disconnect()
-        infiniteJumpConnection = nil
-    end
-
-    if spamJumpConnection then
-        spamJumpConnection:Disconnect()
-        spamJumpConnection = nil
-    end
-
-    local char = LocalPlayer.Character
-    if char then
-        local hum = char:FindFirstChildOfClass("Humanoid")
-        if hum then
-            hum.PlatformStand = false
-            hum:SetStateEnabled(Enum.HumanoidStateType.Seated, true)
-            if hum.SeatPart then hum:Sit(false) end
-        end
-    end
-    flyActive = false
-end
-
-local function setupFlyMovement()
-    if flyConnection then
-        flyConnection:Disconnect()
-        flyConnection = nil
-    end
-
-    if not flyActive then return end
-
-    flyConnection = RunService.RenderStepped:Connect(function(dt)
-        if not flyActive then return end
-        local c = LocalPlayer.Character
-        if not c then return end
-        local root = c:FindFirstChild("HumanoidRootPart")
-        if not root then return end
-
-        local cam = Workspace.CurrentCamera
-        if not cam then return end
-
-        local move = Vector3.new()
-        if UserInputService:IsKeyDown(Enum.KeyCode.W) then
-            move = move + cam.CFrame.LookVector
-        end
-        if UserInputService:IsKeyDown(Enum.KeyCode.S) then
-            move = move - cam.CFrame.LookVector
-        end
-        if UserInputService:IsKeyDown(Enum.KeyCode.A) then
-            move = move - cam.CFrame.RightVector
-        end
-        if UserInputService:IsKeyDown(Enum.KeyCode.D) then
-            move = move + cam.CFrame.RightVector
-        end
-        if UserInputService:IsKeyDown(Enum.KeyCode.Space) then
-            move = move + Vector3.new(0, 1, 0)
-        end
-        if UserInputService:IsKeyDown(Enum.KeyCode.LeftShift) then
-            move = move - Vector3.new(0, 1, 0)
-        end
-
-        if move.Magnitude > 0 then
-            move = move.Unit
-        end
-
-        local method = Config.FlyMethod
-        local speed = Config.FlySpeed
-
-        if method == "CFrame" then
-            root.CFrame = root.CFrame + move * speed * dt
-        elseif method == "BodyVelocity + Gyro" then
-            if flyBV and flyBG then
-                flyBG.CFrame = cam.CFrame
-                flyBV.Velocity = move * speed
-            end
-        elseif method == "Seat" then
-            if flyBV and flyBG and flySeat then
-                flyBG.CFrame = cam.CFrame
-                flyBV.Velocity = move * speed
-            end
-        end
-    end)
-    maid:add(flyConnection)
-end
-
-local function setFly(enabled, method, speed)
-    local char = LocalPlayer.Character
-    if not char then return end
-    local hrp = char:FindFirstChild("HumanoidRootPart")
-    local hum = char:FindFirstChildOfClass("Humanoid")
-    if not hrp or not hum then return end
-
-    cleanFly()
-
-    if not enabled then
-        flyActive = false
-        return end
-
-    flyActive = true
-
-    if method == "CFrame" then
-        hum.PlatformStand = true
-    elseif method == "BodyVelocity + Gyro" then
-        flyBV = Instance.new("BodyVelocity")
-        flyBV.MaxForce = Vector3.new(1e6, 1e6, 1e6)
-        flyBV.Parent = hrp
-
-        flyBG = Instance.new("BodyGyro")
-        flyBG.MaxTorque = Vector3.new(1e6, 1e6, 1e6)
-        flyBG.Parent = hrp
-    elseif method == "Seat" then
-        flySeat = Instance.new("VehicleSeat")
-        flySeat.Size = Vector3.new(1, 1, 1)
-        flySeat.Transparency = 1
-        flySeat.CanCollide = false
-        flySeat.Parent = Workspace
-
-        flyWeld = Instance.new("Weld")
-        flyWeld.Part0 = hrp
-        flyWeld.Part1 = flySeat
-        flyWeld.C0 = CFrame.new(0, -1.5, 0)
-        flyWeld.Parent = flySeat
-
-        hum:Sit(true)
-        hum.PlatformStand = true
-        hum:SetStateEnabled(Enum.HumanoidStateType.Seated, false)
-
-        flyBV = Instance.new("BodyVelocity")
-        flyBV.MaxForce = Vector3.new(1e6, 1e6, 1e6)
-        flyBV.Parent = flySeat
-
-        flyBG = Instance.new("BodyGyro")
-        flyBG.MaxTorque = Vector3.new(1e6, 1e6, 1e6)
-        flyBG.Parent = flySeat
-    end
-
-    setupFlyMovement()
 end
 
 local function setupInfiniteJump(enabled)
@@ -2979,7 +2940,7 @@ local function buildUI()
 
         section:Dropdown({
             Title = "Fly Method",
-            Values = { "CFrame", "BodyVelocity + Gyro", "Seat" },
+            Values = { "CFrame", "BodyVelocity + Gyro" },
             Value = "BodyVelocity + Gyro",
             Callback = function(value)
                 Config.FlyMethod = value
