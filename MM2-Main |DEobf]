@@ -2833,6 +2833,18 @@ local function buildUI()
         end
     end)
 
+    -- Personnalisation du bouton d'ouverture
+    mainWindow:EditOpenButton({
+        Title = "Sentinel - Murder Mystery",
+        Icon = "door-open",
+        CornerRadius = UDim.new(0, 24),
+        StrokeThickness = 2,
+        Color = ColorSequence.new(Color3.fromHex("FF0F7B"), Color3.fromHex("F89B29")),
+        OnlyMobile = false,
+        Enabled = true,
+        Draggable = true,
+    })
+
     local playerTab = mainWindow:Tab({ Title = "Player", Icon = "user" })
 
     do
