@@ -5,8 +5,26 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local StarterGui = game:GetService("StarterGui")
 local Workspace = game:GetService("Workspace")
 local TweenService = game:GetService("TweenService")
+local CollectionService = game:GetService("CollectionService")
 local LocalPlayer = Players.LocalPlayer
 if not LocalPlayer then return end
+
+local ESP = {
+    MurdererHighlight = false,
+    SheriffHighlight = false,
+    InnocentHighlight = false,
+    MurdererTracer = false,
+    SheriffTracer = false,
+    InnocentTracer = false,
+    MurdererSkeleton = false,
+    SheriffSkeleton = false,
+    InnocentSkeleton = false,
+    MurdererColor = Color3.fromRGB(255, 0, 0),
+    SheriffColor = Color3.fromRGB(0, 100, 255),
+    InnocentColor = Color3.fromRGB(0, 255, 0),
+    MaxDistance = 0,
+    SkeletonThickness = 1.5,
+}
 
 local PlayerData = {}
 
@@ -56,12 +74,8 @@ local Config = {
     AimlockShowFOV = false,
     AimlockFOVRadius = 75,
     SilentAimEnabled = false,
-    SilentAimShowFOV = false,
+    SilentAimUseFOV = false,
     SilentAimFOVRadius = 75,
-    KillAuraEnabled = false,
-    KillAuraSize = 10,
-    KillAuraVisibility = 0.7,
-    KillAllWhitelist = {},
     AutoFarmEnabled = false,
     AutoFarmType = "Coins",
     AutoFarmMethod = "Nearest",
@@ -70,30 +84,10 @@ local Config = {
     AutoFlingMurderer = false,
     FakeSpeedGlitch = false,
     FakeSpeedGlitchPower = 50,
-    KnifeAttackDelayEnabled = false,
-    KnifeAttackDelay = 0.3,
     WallBangEnabled = false,
 }
 
-local ESP = {
-    MurdererHighlight = false,
-    SheriffHighlight = false,
-    InnocentHighlight = false,
-    MurdererTracer = false,
-    SheriffTracer = false,
-    InnocentTracer = false,
-    MurdererSkeleton = false,
-    SheriffSkeleton = false,
-    InnocentSkeleton = false,
-    MurdererColor = Color3.fromRGB(255, 0, 0),
-    SheriffColor = Color3.fromRGB(0, 100, 255),
-    InnocentColor = Color3.fromRGB(0, 255, 0),
-    MaxDistance = 0,
-    SkeletonThickness = 1.5,
-}
-
--- Caches pour les éléments ESP
-local highlightCache = {}  -- [player] = Highlight
+local highlightCache = {}
 local tracerCache = {}
 local skeletonCache = {}
 
@@ -134,13 +128,14 @@ local infiniteJumpConnection = nil
 local spamJumpConnection = nil
 local noclipConnection = nil
 
--- Variables de vol
 local flyBV = nil
 local flyBG = nil
+local flySeat = nil
+local flyWeld = nil
 local flyActive = false
 local flyConnection = nil
 
-local ESPHighlights = {} -- plus utilisé, on utilise highlightCache
+local ESPHighlights = {}
 local ESPUpdateConnection = nil
 local playerAddedConnection = nil
 local playerRemovingConnection = nil
@@ -174,13 +169,6 @@ local silentFOVCircle = nil
 local silentCircleUpdateConn = nil
 
 local cachedSpawnPosition = nil
-
-local KillAuraConnections = {}
-
-local killAllRunning = false
-local whitelistDropdown = nil
-local whitelistSection = nil
-local whitelistRefreshTimer = nil
 
 local autoFarmRunning = false
 local autoFarmConnection = nil
@@ -224,7 +212,6 @@ local function getWeaponService()
     return nil
 end
 
--- Fonctions utilitaires (hasItemInBackpack, hasItemEquipped)
 local function hasItemInBackpack(player, itemName)
     local backpack = player:FindFirstChildOfClass("Backpack")
     if backpack then
@@ -246,10 +233,7 @@ local function hasItemEquipped(char, itemName)
     return false
 end
 
--- ============= ESP CORRIGÉ =============
-
 local function getPlayerRole(player)
-    -- Priorité à PlayerData si disponible, sinon on utilise les outils
     local roleFromData = nil
     if Event then
         local data = PlayerData[player.Name]
@@ -258,14 +242,12 @@ local function getPlayerRole(player)
         end
     end
 
-    -- Si on a un rôle via PlayerData, on l'utilise
     if roleFromData then
         if roleFromData == "Murderer" then return "Murderer", ESP.MurdererColor
         elseif roleFromData == "Sheriff" then return "Sheriff", ESP.SheriffColor
         else return "Innocent", ESP.InnocentColor end
     end
 
-    -- Fallback : détection par outils (même si Event existe, on l'utilise quand les données ne sont pas encore là)
     local char = player.Character
     if char then
         if hasItemEquipped(char, "Knife") or hasItemEquipped(char, "knife") or hasItemEquipped(char, "KNIFE") then
@@ -283,20 +265,17 @@ local function getPlayerRole(player)
 end
 
 local function clearESP()
-    -- Highlights
     for player, hl in pairs(highlightCache) do
         if hl then hl:Destroy() end
     end
     table.clear(highlightCache)
 
-    -- Tracers
     if Drawing then
         for id, line in pairs(tracerCache) do
             if line then line.Visible = false end
         end
     end
 
-    -- Squelettes
     for player, lines in pairs(skeletonCache) do
         for _, line in pairs(lines) do
             if line then line.Visible = false end
@@ -321,7 +300,6 @@ local function updateHighlights()
         local role, color = getPlayerRole(player)
         local shouldHighlight = role and activeHighlightRoles[role] or false
 
-        -- Vérification distance
         local withinDistance = true
         if shouldHighlight and ESP.MaxDistance > 0 then
             local char = player.Character
@@ -628,14 +606,12 @@ local function updateSkeletons()
     end
 end
 
--- Fonction de rafraîchissement complet (appelée lors des changements de config ou de données)
 local function refreshESP()
     updateHighlights()
     updateTracers()
     updateSkeletons()
 end
 
--- Fonction de démarrage (appelée une fois, met en place la boucle pour tracers/squelettes)
 local function startESP()
     clearESP()
     refreshESP()
@@ -645,16 +621,13 @@ local function startESP()
         ESPUpdateConnection = nil
     end
 
-    -- Mise à jour en continu des tracers et squelettes (car ils bougent)
     ESPUpdateConnection = RunService.Heartbeat:Connect(function()
         updateTracers()
         updateSkeletons()
-        -- Les highlights sont gérés via refreshESP uniquement
     end)
     maid:add(ESPUpdateConnection)
 end
 
--- Gestion des joueurs ajoutés/supprimés
 local function onPlayerAdded(player)
     local conn = player.CharacterAdded:Connect(function()
         task.wait(0.2)
@@ -672,7 +645,6 @@ local function onPlayerRemoving(player)
         characterAddedConnections[player]:Disconnect()
         characterAddedConnections[player] = nil
     end
-    -- Suppression des caches
     if highlightCache[player] then
         highlightCache[player]:Destroy()
         highlightCache[player] = nil
@@ -690,118 +662,6 @@ local function onPlayerRemoving(player)
     refreshESP()
 end
 
--- ============ FIN ESP CORRIGÉ ============
-
--- ============ FLY CORRIGÉ POUR MOBILE ============
-
-local function cleanFly()
-    if flyBV then flyBV:Destroy(); flyBV = nil end
-    if flyBG then flyBG:Destroy(); flyBG = nil end
-    if flyConnection then flyConnection:Disconnect(); flyConnection = nil end
-
-    -- On restaure le humanoid si nécessaire
-    local char = LocalPlayer.Character
-    if char then
-        local hum = char:FindFirstChildOfClass("Humanoid")
-        if hum then
-            hum.PlatformStand = false
-        end
-    end
-    flyActive = false
-end
-
-local function setupFlyMovement()
-    if flyConnection then
-        flyConnection:Disconnect()
-        flyConnection = nil
-    end
-
-    if not flyActive then return end
-
-    flyConnection = RunService.RenderStepped:Connect(function(dt)
-        if not flyActive then return end
-        local c = LocalPlayer.Character
-        if not c then return end
-        local root = c:FindFirstChild("HumanoidRootPart")
-        if not root then return end
-
-        local cam = Workspace.CurrentCamera
-        if not cam then return end
-
-        local move = Vector3.new()
-        -- Touches WASD / flèches / joystick virtuel (IsKeyDown fonctionne sur mobile)
-        if UserInputService:IsKeyDown(Enum.KeyCode.W) then
-            move = move + cam.CFrame.LookVector
-        end
-        if UserInputService:IsKeyDown(Enum.KeyCode.S) then
-            move = move - cam.CFrame.LookVector
-        end
-        if UserInputService:IsKeyDown(Enum.KeyCode.A) then
-            move = move - cam.CFrame.RightVector
-        end
-        if UserInputService:IsKeyDown(Enum.KeyCode.D) then
-            move = move + cam.CFrame.RightVector
-        end
-        if UserInputService:IsKeyDown(Enum.KeyCode.Space) then
-            move = move + Vector3.new(0, 1, 0)
-        end
-        if UserInputService:IsKeyDown(Enum.KeyCode.LeftShift) then
-            move = move - Vector3.new(0, 1, 0)
-        end
-
-        if move.Magnitude > 0 then
-            move = move.Unit
-        end
-
-        local method = Config.FlyMethod
-        local speed = Config.FlySpeed
-
-        if method == "CFrame" then
-            root.CFrame = root.CFrame + move * speed * dt
-        elseif method == "BodyVelocity + Gyro" then
-            if flyBV and flyBG then
-                flyBG.CFrame = cam.CFrame
-                flyBV.Velocity = move * speed
-            end
-        end
-    end)
-    maid:add(flyConnection)
-end
-
-local function setFly(enabled, method, speed)
-    local char = LocalPlayer.Character
-    if not char then return end
-    local hrp = char:FindFirstChild("HumanoidRootPart")
-    local hum = char:FindFirstChildOfClass("Humanoid")
-    if not hrp or not hum then return end
-
-    cleanFly()
-
-    if not enabled then
-        flyActive = false
-        return
-    end
-
-    flyActive = true
-
-    if method == "CFrame" then
-        hum.PlatformStand = true
-    elseif method == "BodyVelocity + Gyro" then
-        flyBV = Instance.new("BodyVelocity")
-        flyBV.MaxForce = Vector3.new(1e6, 1e6, 1e6)
-        flyBV.Parent = hrp
-
-        flyBG = Instance.new("BodyGyro")
-        flyBG.MaxTorque = Vector3.new(1e6, 1e6, 1e6)
-        flyBG.Parent = hrp
-    end
-
-    setupFlyMovement()
-end
-
--- ============ FIN FLY ============
-
--- Le reste des fonctions (WalkSpeed, Jump, etc.) reste inchangé
 local function setWalkSpeed(enabled, speed)
     local char = LocalPlayer.Character
     if not char then return end
@@ -851,6 +711,151 @@ local function setNoclip(enabled)
             end
         end
     end
+end
+
+local function cleanFly()
+    if flyBV then flyBV:Destroy(); flyBV = nil end
+    if flyBG then flyBG:Destroy(); flyBG = nil end
+    if flySeat then flySeat:Destroy(); flySeat = nil end
+    if flyWeld then flyWeld:Destroy(); flyWeld = nil end
+    if flyConnection then flyConnection:Disconnect(); flyConnection = nil end
+
+    if infiniteJumpConnection then
+        infiniteJumpConnection:Disconnect()
+        infiniteJumpConnection = nil
+    end
+
+    if spamJumpConnection then
+        spamJumpConnection:Disconnect()
+        spamJumpConnection = nil
+    end
+
+    local char = LocalPlayer.Character
+    if char then
+        local hum = char:FindFirstChildOfClass("Humanoid")
+        if hum then
+            hum.PlatformStand = false
+            hum:SetStateEnabled(Enum.HumanoidStateType.Seated, true)
+            if hum.SeatPart then hum:Sit(false) end
+        end
+    end
+    flyActive = false
+end
+
+local function setupFlyMovement()
+    if flyConnection then
+        flyConnection:Disconnect()
+        flyConnection = nil
+    end
+
+    if not flyActive then return end
+
+    flyConnection = RunService.RenderStepped:Connect(function(dt)
+        if not flyActive then return end
+        local c = LocalPlayer.Character
+        if not c then return end
+        local root = c:FindFirstChild("HumanoidRootPart")
+        if not root then return end
+
+        local cam = Workspace.CurrentCamera
+        if not cam then return end
+
+        local move = Vector3.new()
+        if UserInputService:IsKeyDown(Enum.KeyCode.W) then
+            move = move + cam.CFrame.LookVector
+        end
+        if UserInputService:IsKeyDown(Enum.KeyCode.S) then
+            move = move - cam.CFrame.LookVector
+        end
+        if UserInputService:IsKeyDown(Enum.KeyCode.A) then
+            move = move - cam.CFrame.RightVector
+        end
+        if UserInputService:IsKeyDown(Enum.KeyCode.D) then
+            move = move + cam.CFrame.RightVector
+        end
+        if UserInputService:IsKeyDown(Enum.KeyCode.Space) then
+            move = move + Vector3.new(0, 1, 0)
+        end
+        if UserInputService:IsKeyDown(Enum.KeyCode.LeftShift) then
+            move = move - Vector3.new(0, 1, 0)
+        end
+
+        if move.Magnitude > 0 then
+            move = move.Unit
+        end
+
+        local method = Config.FlyMethod
+        local speed = Config.FlySpeed
+
+        if method == "CFrame" then
+            root.CFrame = root.CFrame + move * speed * dt
+        elseif method == "BodyVelocity + Gyro" then
+            if flyBV and flyBG then
+                flyBG.CFrame = cam.CFrame
+                flyBV.Velocity = move * speed
+            end
+        elseif method == "Seat" then
+            if flyBV and flyBG and flySeat then
+                flyBG.CFrame = cam.CFrame
+                flyBV.Velocity = move * speed
+            end
+        end
+    end)
+    maid:add(flyConnection)
+end
+
+local function setFly(enabled, method, speed)
+    local char = LocalPlayer.Character
+    if not char then return end
+    local hrp = char:FindFirstChild("HumanoidRootPart")
+    local hum = char:FindFirstChildOfClass("Humanoid")
+    if not hrp or not hum then return end
+
+    cleanFly()
+
+    if not enabled then
+        flyActive = false
+        return end
+
+    flyActive = true
+
+    if method == "CFrame" then
+        hum.PlatformStand = true
+    elseif method == "BodyVelocity + Gyro" then
+        flyBV = Instance.new("BodyVelocity")
+        flyBV.MaxForce = Vector3.new(1e6, 1e6, 1e6)
+        flyBV.Parent = hrp
+
+        flyBG = Instance.new("BodyGyro")
+        flyBG.MaxTorque = Vector3.new(1e6, 1e6, 1e6)
+        flyBG.Parent = hrp
+    elseif method == "Seat" then
+        flySeat = Instance.new("VehicleSeat")
+        flySeat.Size = Vector3.new(1, 1, 1)
+        flySeat.Transparency = 1
+        flySeat.CanCollide = false
+        flySeat.Parent = Workspace
+
+        flyWeld = Instance.new("Weld")
+        flyWeld.Part0 = hrp
+        flyWeld.Part1 = flySeat
+        flyWeld.C0 = CFrame.new(0, -1.5, 0)
+        flyWeld.Parent = flySeat
+
+        hum:Sit(true)
+        hum.PlatformStand = true
+        hum:SetStateEnabled(Enum.HumanoidStateType.Seated, false)
+
+        flyBV = Instance.new("BodyVelocity")
+        flyBV.MaxForce = Vector3.new(1e6, 1e6, 1e6)
+        flyBV.Parent = flySeat
+
+        flyBG = Instance.new("BodyGyro")
+        flyBG.MaxTorque = Vector3.new(1e6, 1e6, 1e6)
+        flyBG.Parent = flySeat
+    end
+
+    setupFlyMovement()
 end
 
 local function setupInfiniteJump(enabled)
@@ -1040,8 +1045,6 @@ local function setupCharacter(char)
     end))
 end
 
--- ====== Combat & autres fonctions (inchangées) ======
-
 local function findGunDrop()
     for _, model in ipairs(Workspace:GetChildren()) do
         if model:IsA("Model") then
@@ -1146,7 +1149,7 @@ local function handleGrabAction()
     if role == "Murderer" then
         pcall(function()
             if WindUI and WindUI.Notify then
-                WindUI:Notify({ Title = "Grab", Content = "Murderers cannot grab the gun!", Duration = 3 })
+                WindUI:Notify({ Title = "Grab", Content = "Murderers cannot grab the gun!", Duration = 3, Icon = "ban" })
             end
         end)
         return
@@ -1155,7 +1158,7 @@ local function handleGrabAction()
     if not gun then
         pcall(function()
             if WindUI and WindUI.Notify then
-                WindUI:Notify({ Title = "Grab", Content = "Wait for the sheriff to die first", Duration = 3 })
+                WindUI:Notify({ Title = "Grab", Content = "Wait for the sheriff to die first", Duration = 3, Icon = "clock" })
             end
         end)
         return
@@ -1165,13 +1168,13 @@ local function handleGrabAction()
     if playerHasGun() then
         pcall(function()
             if WindUI and WindUI.Notify then
-                WindUI:Notify({ Title = "Grab", Content = "Gun grabbed successfully!", Duration = 2 })
+                WindUI:Notify({ Title = "Grab", Content = "Gun grabbed successfully!", Duration = 2, Icon = "check" })
             end
         end)
     else
         pcall(function()
             if WindUI and WindUI.Notify then
-                WindUI:Notify({ Title = "Grab", Content = "Failed :(", Duration = 2 })
+                WindUI:Notify({ Title = "Grab", Content = "Failed :(", Duration = 2, Icon = "x" })
             end
         end)
     end
@@ -1368,218 +1371,6 @@ local function stopDodge()
     table.clear(dodgeKnifeList)
 end
 
-local function ApplyKillAura()
-    for _, conn in ipairs(KillAuraConnections) do
-        pcall(conn.Disconnect, conn)
-    end
-    table.clear(KillAuraConnections)
-
-    if not Config.KillAuraEnabled then return end
-
-    for _, player in ipairs(Players:GetPlayers()) do
-        if player ~= LocalPlayer then
-            local char = player.Character
-            if char then
-                local hrp = char:FindFirstChild("HumanoidRootPart")
-                if hrp then
-                    local size = Config.KillAuraSize
-                    local _, color = getPlayerRole(player)
-                    hrp.Size = Vector3.new(size, size, size)
-                    hrp.Transparency = Config.KillAuraVisibility
-                    hrp.BrickColor = BrickColor.new(color)
-                    hrp.Material = Enum.Material.Neon
-                    hrp.CanCollide = false
-
-                    local conn = hrp:GetPropertyChangedSignal("Size"):Connect(function()
-                        if Config.KillAuraEnabled then
-                            hrp.Size = Vector3.new(Config.KillAuraSize, Config.KillAuraSize, Config.KillAuraSize)
-                        end
-                    end)
-                    table.insert(KillAuraConnections, conn)
-                end
-            end
-        end
-    end
-end
-
-local function ClearKillAura()
-    for _, conn in ipairs(KillAuraConnections) do
-        pcall(conn.Disconnect, conn)
-    end
-    table.clear(KillAuraConnections)
-
-    for _, player in ipairs(Players:GetPlayers()) do
-        if player ~= LocalPlayer and player.Character then
-            local hrp = player.Character:FindFirstChild("HumanoidRootPart")
-            if hrp then
-                hrp.Size = Vector3.new(2, 2, 2)
-                hrp.Transparency = 1
-                hrp.BrickColor = BrickColor.new("Medium stone grey")
-                hrp.Material = Enum.Material.Plastic
-                hrp.CanCollide = true
-            end
-        end
-    end
-end
-
-local function onCharacterAddedForKillAura(player, char)
-    task.wait(0.1)
-    if Config.KillAuraEnabled then
-        ApplyKillAura()
-    end
-end
-
-local function onPlayerAddedForKillAura(player)
-    if player == LocalPlayer then return end
-    local conn = player.CharacterAdded:Connect(function(char)
-        onCharacterAddedForKillAura(player, char)
-    end)
-    table.insert(KillAuraConnections, conn)
-
-    if player.Character then
-        onCharacterAddedForKillAura(player, player.Character)
-    end
-end
-
-local function startKillAll()
-    if killAllRunning then return end
-
-    local knife = nil
-    local backpack = LocalPlayer:FindFirstChildOfClass("Backpack")
-    if backpack then
-        for _, tool in ipairs(backpack:GetChildren()) do
-            if tool.Name == "Knife" then
-                knife = tool
-                break
-            end
-        end
-    end
-    if not knife then
-        local char = LocalPlayer.Character
-        if char then
-            for _, tool in ipairs(char:GetChildren()) do
-                if tool:IsA("Tool") and tool.Name == "Knife" then
-                    knife = tool
-                    break
-                end
-            end
-        end
-    end
-    if not knife then
-        pcall(function()
-            if WindUI and WindUI.Notify then
-                WindUI:Notify({ Title = "Kill All", Content = "No knife found! Cannot start.", Duration = 3 })
-            end
-        end)
-        return
-    end
-
-    killAllRunning = true
-
-    task.spawn(function()
-        while killAllRunning do
-            local target = nil
-            local players = Players:GetPlayers()
-            for _, p in ipairs(players) do
-                if p ~= LocalPlayer and p.Character and p.Character:FindFirstChild("HumanoidRootPart") and p.Character:FindFirstChildOfClass("Humanoid") and p.Character.Humanoid.Health > 0 then
-                    local whitelisted = false
-                    for _, name in ipairs(Config.KillAllWhitelist) do
-                        if name == p.Name then
-                            whitelisted = true
-                            break
-                        end
-                    end
-                    if not whitelisted then
-                        target = p
-                        break
-                    end
-                end
-            end
-
-            if not target then
-                task.wait(5)
-                continue
-            end
-
-            local localChar = LocalPlayer.Character
-            if not localChar then
-                task.wait(0.5)
-                continue
-            end
-            local localHrp = localChar:FindFirstChild("HumanoidRootPart")
-            if not localHrp then
-                task.wait(0.5)
-                continue
-            end
-
-            local targetHrp = target.Character:FindFirstChild("HumanoidRootPart")
-            if targetHrp then
-                localHrp.CFrame = targetHrp.CFrame
-            end
-
-            local currentKnife = nil
-            for _, tool in ipairs(localChar:GetChildren()) do
-                if tool:IsA("Tool") and tool.Name == "Knife" then
-                    currentKnife = tool
-                    break
-                end
-            end
-            if not currentKnife then
-                if backpack then
-                    for _, tool in ipairs(backpack:GetChildren()) do
-                        if tool.Name == "Knife" then
-                            currentKnife = tool
-                            break
-                        end
-                    end
-                end
-            end
-            if not currentKnife then
-                killAllRunning = false
-                pcall(function()
-                    if WindUI and WindUI.Notify then
-                        WindUI:Notify({ Title = "Kill All", Content = "Knife lost! Stopping.", Duration = 3 })
-                    end
-                end)
-                break
-            end
-
-            if currentKnife.Parent ~= localChar then
-                currentKnife.Parent = localChar
-                task.wait(0.1)
-            end
-
-            local targetDied = false
-            while not targetDied and killAllRunning do
-                if not target.Character or not target.Character:FindFirstChild("HumanoidRootPart") or not target.Character:FindFirstChildOfClass("Humanoid") or target.Character.Humanoid.Health <= 0 then
-                    targetDied = true
-                    break
-                end
-
-                if Config.KnifeAttackDelayEnabled then
-                    task.wait(Config.KnifeAttackDelay)
-                end
-                currentKnife:Activate()
-                task.wait(0.1)
-
-                local currentHrp = target.Character:FindFirstChild("HumanoidRootPart")
-                if currentHrp and localChar and localChar:FindFirstChild("HumanoidRootPart") then
-                    localChar.HumanoidRootPart.CFrame = currentHrp.CFrame
-                end
-            end
-
-            if targetDied then
-                task.wait(0.5)
-            end
-        end
-    end)
-end
-
-local function stopKillAll()
-    killAllRunning = false
-end
-
--- AutoFarm
 local function getCoinObjects()
     local coins = {}
     for _, model in ipairs(Workspace:GetChildren()) do
@@ -1626,11 +1417,10 @@ if RoundStartEvent then
         if Config.AutoFarmEnabled then
             pcall(function()
                 if WindUI and WindUI.Notify then
-                    WindUI:Notify({ Title = "AutoFarm", Content = "Round started! AutoFarm resumed.", Duration = 2 })
+                    WindUI:Notify({ Title = "AutoFarm", Content = "Round started! AutoFarm resumed.", Duration = 2, Icon = "play" })
                 end
             end)
         end
-        -- Forcer une mise à jour des ESP au début du round
         refreshESP()
     end)
 end
@@ -1641,11 +1431,10 @@ if RoundEndFadeEvent then
         if Config.AutoFarmEnabled then
             pcall(function()
                 if WindUI and WindUI.Notify then
-                    WindUI:Notify({ Title = "AutoFarm", Content = "Round ended! AutoFarm paused.", Duration = 2 })
+                    WindUI:Notify({ Title = "AutoFarm", Content = "Round ended! AutoFarm paused.", Duration = 2, Icon = "pause" })
                 end
             end)
         end
-        -- Optionnel : on peut aussi rafraîchir les ESP à la fin du round, mais pas nécessaire
     end)
 end
 
@@ -1657,7 +1446,7 @@ if CoinCollectedEvent then
                 if Config.AutoReset and roundActive then
                     pcall(function()
                         if WindUI and WindUI.Notify then
-                            WindUI:Notify({ Title = "AutoFarm", Content = "Bag full! Resetting...", Duration = 2 })
+                            WindUI:Notify({ Title = "AutoFarm", Content = "Bag full! Resetting...", Duration = 2, Icon = "refresh-cw" })
                         end
                     end)
                     if Config.AutoFlingMurderer then
@@ -1666,7 +1455,7 @@ if CoinCollectedEvent then
                                 local murderer = p
                                 pcall(function()
                                     if WindUI and WindUI.Notify then
-                                        WindUI:Notify({ Title = "AutoFarm", Content = "Flinging murderer: " .. murderer.Name, Duration = 2 })
+                                        WindUI:Notify({ Title = "AutoFarm", Content = "Flinging murderer: " .. murderer.Name, Duration = 2, Icon = "rocket" })
                                     end
                                 end)
                                 local char = LocalPlayer.Character
@@ -1865,7 +1654,6 @@ local function setupFakeSpeedGlitch(enabled)
     maid:add(fakeSpeedGlitchConnection)
 end
 
--- Epstein Jutsu
 local function epsteinEnableNoclip()
     local char = LocalPlayer.Character
     if not char then return end
@@ -1928,7 +1716,7 @@ local function startEpsteinJutsu()
     if not epsteinTarget or not epsteinTarget.Character then
         pcall(function()
             if WindUI and WindUI.Notify then
-                WindUI:Notify({ Title = "Epstein Jutsu", Content = "No target selected!", Duration = 2 })
+                WindUI:Notify({ Title = "Epstein Jutsu", Content = "No target selected!", Duration = 2, Icon = "user-x" })
             end
         end)
         return
@@ -1970,7 +1758,7 @@ local function startEpsteinJutsu()
             stopEpsteinJutsu()
             pcall(function()
                 if WindUI and WindUI.Notify then
-                    WindUI:Notify({ Title = "Epstein Jutsu", Content = "Target lost! Stopping.", Duration = 2 })
+                    WindUI:Notify({ Title = "Epstein Jutsu", Content = "Target lost! Stopping.", Duration = 2, Icon = "alert-circle" })
                 end
             end)
             return
@@ -1987,7 +1775,7 @@ local function startEpsteinJutsu()
             stopEpsteinJutsu()
             pcall(function()
                 if WindUI and WindUI.Notify then
-                    WindUI:Notify({ Title = "Epstein Jutsu", Content = "Target is dead! Stopping.", Duration = 2 })
+                    WindUI:Notify({ Title = "Epstein Jutsu", Content = "Target is dead! Stopping.", Duration = 2, Icon = "skull" })
                 end
             end)
             return
@@ -2064,7 +1852,6 @@ local function refreshEpsteinDropdown()
     epsteinDropdown:Refresh(names)
 end
 
--- Aimlock
 local function isTargetValidForAimlock(player)
     local role, _ = getPlayerRole(player)
     if role ~= "Murderer" then return false end
@@ -2164,17 +1951,271 @@ local function setupAimlock(enabled)
     end)
 end
 
--- Silent Aim
+local function checkHookSupport()
+    local ok, result = pcall(function()
+        local testFunc = function() return "original" end
+        local hooked = hookfunction(testFunc, function() return "hooked" end)
+        if hooked and testFunc() == "hooked" then
+            hookfunction(testFunc, hooked)
+            return true
+        end
+        return false
+    end)
+    return ok and result == true
+end
+
+local hookSupported = checkHookSupport()
+
+local executorName = "Unknown"
+local idFunc = identifyexecutor
+if type(idFunc) == "function" then
+    local name = idFunc()
+    if type(name) == "string" and #name > 0 then
+        executorName = name
+    end
+else
+    if syn then executorName = "Synapse X"
+    elseif KRNL_LOADED then executorName = "KRNL"
+    elseif getexecutorname then executorName = "Script-Ware"
+    elseif IsElectron == true then executorName = "Electron"
+    elseif FLUXUS_LOADED then executorName = "Fluxus"
+    elseif hookfunction_raw and hmjdfk then executorName = "Fluxus (Mac)"
+    elseif shadow_env then executorName = "Shadow"
+    elseif is_sirhurt_closure then executorName = "SirHurt"
+    elseif WRDAPI then executorName = "WeAreDes"
+    elseif SENTINEL_LOADED then executorName = "Sentinel"
+    elseif PROTOSMASHER_LOADED then executorName = "Protosmasher"
+    elseif isvm then executorName = "Proxo"
+    elseif IS_VIVA_LOADED then executorName = "Viva"
+    elseif jit then executorName = "EasyExploits"
+    elseif CalamariLuaEnv then executorName = "Calamari"
+    elseif unit then executorName = "Unit"
+    end
+end
+
+local deviceType = "PC"
+if syn and syn.getplatform then
+    local platform = syn.getplatform()
+    if platform == "UWP" then deviceType = "UWP" elseif platform == "Android" then deviceType = "Mobile"
+    end
+elseif KRNL_LOADED and type(KRNL_LOADED) == "table" and KRNL_LOADED.Platform then
+    if KRNL_LOADED.Platform == "UWP" then deviceType = "UWP" end
+elseif game and game:GetService("UserInputService").TouchEnabled and not UserInputService.MouseEnabled then
+    deviceType = "Mobile"
+end
+
+local accountAge = "Unknown"
+if LocalPlayer and LocalPlayer.AccountAge then
+    accountAge = tostring(LocalPlayer.AccountAge) .. " days"
+end
+
+local userName = LocalPlayer and LocalPlayer.Name or "Unknown"
+
+local startTime = os.clock()
+
+local function isFeatureSupported(featureName)
+    local features = {
+        walkSpeed = true,
+        jumpPower = true,
+        gravity = true,
+        fly = true,
+        noclip = true,
+        fov = true,
+        dezoom = true,
+        autoGrab = true,
+        dodge = true,
+        fakeSpeedGlitch = true,
+        aimlock = true,
+        silentAim = hookSupported,
+        wallBang = hookSupported,
+        autoFarm = true,
+        epsteinJutsu = true,
+        esp = true,
+        teleport = true,
+    }
+    return features[featureName] or false
+end
+
+local wallBangConnection = nil
+local originalShootFireServer = nil
+local wallBangRemoteEvent = nil
+
+local function findShootRemoteInTool()
+    local char = LocalPlayer.Character
+    if char then
+        for _, tool in ipairs(char:GetChildren()) do
+            if tool:IsA("Tool") then
+                local shoot = tool:FindFirstChild("Shoot")
+                if shoot and shoot:IsA("RemoteEvent") then
+                    return shoot, tool
+                end
+            end
+        end
+    end
+    local backpack = LocalPlayer:FindFirstChildOfClass("Backpack")
+    if backpack then
+        for _, tool in ipairs(backpack:GetChildren()) do
+            if tool:IsA("Tool") then
+                local shoot = tool:FindFirstChild("Shoot")
+                if shoot and shoot:IsA("RemoteEvent") then
+                    return shoot, tool
+                end
+            end
+        end
+    end
+    return nil, nil
+end
+
+local function setupWallBang(enabled)
+    Config.WallBangEnabled = enabled
+
+    if wallBangConnection then
+        wallBangConnection:Disconnect()
+        wallBangConnection = nil
+    end
+
+    if not enabled then
+        if wallBangRemoteEvent and originalShootFireServer then
+            wallBangRemoteEvent.FireServer = originalShootFireServer
+            originalShootFireServer = nil
+            wallBangRemoteEvent = nil
+        end
+        return
+    end
+
+    if not hookSupported then
+        pcall(function()
+            if WindUI and WindUI.Notify then
+                WindUI:Notify({
+                    Title = "Wall Bang",
+                    Content = "Your executor does not support hooks. Wall Bang cannot be activated.",
+                    Duration = 8,
+                    Icon = "alert-triangle"
+                })
+            end
+        end)
+        return
+    end
+
+    local remote, tool = findShootRemoteInTool()
+    if not remote then
+        pcall(function()
+            if WindUI and WindUI.Notify then
+                WindUI:Notify({
+                    Title = "Wall Bang",
+                    Content = "You are not Sheriff. Equip a gun to use Wall Bang.",
+                    Duration = 5,
+                    Icon = "shield-off"
+                })
+            end
+        end)
+        return
+    end
+
+    wallBangRemoteEvent = remote
+    if not originalShootFireServer then
+        originalShootFireServer = remote.FireServer
+    end
+
+    remote.FireServer = function(self, worldCFrame, mouseTargetCFrame)
+        local player = LocalPlayer
+        local char = player.Character
+        if not char then return originalShootFireServer(self, worldCFrame, mouseTargetCFrame) end
+        local root = char:FindFirstChild("HumanoidRootPart")
+        if not root then return originalShootFireServer(self, worldCFrame, mouseTargetCFrame) end
+
+        local target = getClosestMurdererForSilent()
+        if not target then
+            return originalShootFireServer(self, worldCFrame, mouseTargetCFrame)
+        end
+
+        local originalCF = root.CFrame
+        local dirToTarget = (target.Position - originalCF.Position).Unit
+        local newPos = target.Position - dirToTarget * 0.5
+
+        local noclipState = Config.NoclipEnabled
+        if not noclipState then
+            setNoclip(true)
+        end
+
+        root.CFrame = CFrame.new(newPos)
+        local result = originalShootFireServer(self, CFrame.new(newPos), CFrame.new(target.Position))
+
+        task.defer(function()
+            if root and root.Parent then
+                root.CFrame = originalCF
+                if not noclipState then
+                    setNoclip(false)
+                end
+            end
+        end)
+
+        return result
+    end
+
+    local ws = getWeaponService()
+    if ws then
+        if not originalGetMouseTarget then
+            originalGetMouseTarget = ws.GetMouseTargetCFrame
+            originalGetTargetPosition = ws.GetTargetPosition
+            originalWeaponRaycast = ws.WeaponRaycast
+        end
+        ws.GetMouseTargetCFrame = function(self)
+            local t = getClosestMurdererForSilent()
+            if t then return CFrame.new(t.Position) end
+            return originalGetMouseTarget(self)
+        end
+        ws.GetTargetPosition = function(self, x, y)
+            local t = getClosestMurdererForSilent()
+            if t then return CFrame.new(t.Position) end
+            return originalGetTargetPosition(self, x, y)
+        end
+        ws.WeaponRaycast = function(ray)
+            return nil
+        end
+    end
+
+    wallBangConnection = RunService.Heartbeat:Connect(function()
+        local char = LocalPlayer.Character
+        if not char then return end
+        for _, tool in ipairs(char:GetChildren()) do
+            if tool:IsA("Tool") then
+                local cantShoot = tool:FindFirstChild("CantShoot")
+                if cantShoot then
+                    pcall(function()
+                        cantShoot.Enabled = false
+                        cantShoot:Destroy()
+                    end)
+                end
+            end
+        end
+        local backpack = LocalPlayer:FindFirstChildOfClass("Backpack")
+        if backpack then
+            for _, tool in ipairs(backpack:GetChildren()) do
+                if tool:IsA("Tool") then
+                    local cantShoot = tool:FindFirstChild("CantShoot")
+                    if cantShoot then
+                        pcall(function()
+                            cantShoot.Enabled = false
+                            cantShoot:Destroy()
+                        end)
+                    end
+                end
+            end
+        end
+    end)
+    maid:add(wallBangConnection)
+end
+
 local originalGetMouseTarget = nil
 local originalGetTargetPosition = nil
 local originalWeaponRaycast = nil
-local wallBangConnection = nil
 
 local function getClosestMurdererForSilent()
     local cam = Workspace.CurrentCamera
     if not cam then return nil end
     local screenCenter = Vector2.new(cam.ViewportSize.X/2, cam.ViewportSize.Y/2)
-    local target, shortestDistance = nil, (Config.SilentAimShowFOV and Config.SilentAimFOVRadius or math.huge)
+    local target, shortestDistance = nil, (Config.SilentAimUseFOV and Config.SilentAimFOVRadius or math.huge)
     for _, v in pairs(Players:GetPlayers()) do
         if v == LocalPlayer then continue end
         local role, _ = getPlayerRole(v)
@@ -2195,99 +2236,60 @@ local function getClosestMurdererForSilent()
     return target
 end
 
-local function setupWallBang(enabled)
-    Config.WallBangEnabled = enabled
-    if wallBangConnection then
-        wallBangConnection:Disconnect()
-        wallBangConnection = nil
-    end
-    if enabled then
-        wallBangConnection = RunService.Heartbeat:Connect(function()
-            local char = LocalPlayer.Character
-            if not char then return end
-            local gun = char:FindFirstChildOfClass("Tool")
-            if gun then
-                local cantShoot = gun:FindFirstChild("CantShoot")
-                if cantShoot and cantShoot:IsA("BoolValue") then
-                    cantShoot.Enabled = false
-                end
-            end
-        end)
-        if silentActive then
-            setupSilentAim(true)
-        end
-    else
-        if silentActive then
-            setupSilentAim(true)
-        end
-    end
-end
-
 local function setupSilentAim(enabled)
     Config.SilentAimEnabled = enabled
     silentActive = enabled
-
     local ws = getWeaponService()
     if not ws then
         pcall(function()
             if WindUI and WindUI.Notify then
-                WindUI:Notify({ Title = "Silent Aim", Content = "WeaponService not found", Duration = 5 })
+                WindUI:Notify({ Title = "Silent Aim", Content = "WeaponService not found", Duration = 5, Icon = "wrench" })
             end
         end)
         return
     end
-
     if enabled then
+        if not hookSupported then
+            pcall(function()
+                if WindUI and WindUI.Notify then
+                    WindUI:Notify({
+                        Title = "Silent Aim",
+                        Content = "Your executor does not support hooks. Silent Aim cannot be activated.",
+                        Duration = 8,
+                        Icon = "alert-triangle"
+                    })
+                end
+            end)
+            Config.SilentAimEnabled = false
+            return
+        end
         if not originalGetMouseTarget then
             originalGetMouseTarget = ws.GetMouseTargetCFrame
             originalGetTargetPosition = ws.GetTargetPosition
             originalWeaponRaycast = ws.WeaponRaycast
         end
-
         ws.GetMouseTargetCFrame = function(self)
             if silentActive then
-                local target = getClosestMurdererForSilent()
-                if target then
-                    return CFrame.new(target.Position)
-                end
+                local t = getClosestMurdererForSilent()
+                if t then return CFrame.new(t.Position) end
             end
             return originalGetMouseTarget(self)
         end
-
         ws.GetTargetPosition = function(self, x, y)
             if silentActive then
-                local target = getClosestMurdererForSilent()
-                if target then
-                    return CFrame.new(target.Position)
-                end
+                local t = getClosestMurdererForSilent()
+                if t then return CFrame.new(t.Position) end
             end
             return originalGetTargetPosition(self, x, y)
-        end
-
-        if Config.WallBangEnabled then
-            if originalWeaponRaycast then
-                ws.WeaponRaycast = function(ray)
-                    return nil
-                end
-            end
-        else
-            if originalWeaponRaycast then
-                ws.WeaponRaycast = originalWeaponRaycast
-            end
         end
     else
         if originalGetMouseTarget then
             ws.GetMouseTargetCFrame = originalGetMouseTarget
             ws.GetTargetPosition = originalGetTargetPosition
-            if originalWeaponRaycast then
-                ws.WeaponRaycast = originalWeaponRaycast
-            end
             originalGetMouseTarget = nil
             originalGetTargetPosition = nil
-            originalWeaponRaycast = nil
         end
     end
-
     updateSilentFOVCircle()
 end
 
@@ -2297,7 +2299,7 @@ local function updateSilentFOVCircle()
         silentCircleUpdateConn:Disconnect()
         silentCircleUpdateConn = nil
     end
-    if Config.SilentAimShowFOV and silentActive then
+    if Config.SilentAimUseFOV and silentActive then
         if not silentFOVCircle then
             silentFOVCircle = Drawing.new("Circle")
             silentFOVCircle.Thickness = 1
@@ -2323,37 +2325,8 @@ local function updateSilentFOVCircle()
     end
 end
 
--- ============= UI =============
-
 local WindUI = nil
 local mainWindow = nil
-
-local function refreshWhitelist()
-    if not whitelistSection then return end
-
-    if whitelistDropdown then
-        pcall(function()
-            whitelistDropdown:Destroy()
-        end)
-        whitelistDropdown = nil
-    end
-
-    local playerNames = {}
-    for _, p in ipairs(Players:GetPlayers()) do
-        if p ~= LocalPlayer then
-            table.insert(playerNames, p.Name)
-        end
-    end
-
-    whitelistDropdown = whitelistSection:Dropdown({
-        Title = "Select players to whitelist",
-        Values = playerNames,
-        Multi = true,
-        Callback = function(value)
-            Config.KillAllWhitelist = value or {}
-        end
-    })
-end
 
 local function loadWindUI()
     local success, result = pcall(function()
@@ -2609,7 +2582,8 @@ function buildTeleportUI()
                         WindUI:Notify({
                             Title = "Error",
                             Content = "No spawn position available",
-                            Duration = 3
+                            Duration = 3,
+                            Icon = "alert-circle"
                         })
                     end
                 end)
@@ -2640,7 +2614,7 @@ function buildTeleportUI()
             if targetName == "" then
                 pcall(function()
                     if WindUI and WindUI.Notify then
-                        WindUI:Notify({ Title = "Error", Content = "Select a target first", Duration = 3 })
+                        WindUI:Notify({ Title = "Error", Content = "Select a target first", Duration = 3, Icon = "alert-circle" })
                     end
                 end)
                 return
@@ -2651,7 +2625,7 @@ function buildTeleportUI()
             else
                 pcall(function()
                     if WindUI and WindUI.Notify then
-                        WindUI:Notify({ Title = "Error", Content = "Target not found or invalid", Duration = 3 })
+                        WindUI:Notify({ Title = "Error", Content = "Target not found or invalid", Duration = 3, Icon = "alert-circle" })
                     end
                 end)
             end
@@ -2680,7 +2654,7 @@ function buildTeleportUI()
             else
                 pcall(function()
                     if WindUI and WindUI.Notify then
-                        WindUI:Notify({ Title = "Info", Content = "No innocents found", Duration = 3 })
+                        WindUI:Notify({ Title = "Info", Content = "No innocents found", Duration = 3, Icon = "info" })
                     end
                 end)
             end
@@ -2707,7 +2681,7 @@ function buildTeleportUI()
             else
                 pcall(function()
                     if WindUI and WindUI.Notify then
-                        WindUI:Notify({ Title = "Info", Content = "Sheriff not found", Duration = 3 })
+                        WindUI:Notify({ Title = "Info", Content = "Sheriff not found", Duration = 3, Icon = "info" })
                     end
                 end)
             end
@@ -2734,12 +2708,37 @@ function buildTeleportUI()
             else
                 pcall(function()
                     if WindUI and WindUI.Notify then
-                        WindUI:Notify({ Title = "Info", Content = "Murderer not found", Duration = 3 })
+                        WindUI:Notify({ Title = "Info", Content = "Murderer not found", Duration = 3, Icon = "info" })
                     end
                 end)
             end
         end
     })
+end
+
+local function printUncLogs()
+    local function test(name)
+        local ok, result = pcall(function()
+            local fn = getfenv()[name]
+            if fn == nil then
+                return false
+            end
+            return true
+        end)
+        return ok and result or false
+    end
+
+    print("\n============ UNC Test ============")
+    print("hookmetamethod   : " .. tostring(test("hookmetamethod")))
+    print("hookfunction     : " .. tostring(test("hookfunction")))
+    print("__namecall       : " .. tostring(test("getnamecallmethod") and test("setnamecallmethod")))
+    print("__newclosure     : " .. tostring(test("newcclosure")))
+    print("getfenv          : " .. tostring(test("getfenv")))
+    print("Drawing.new      : " .. tostring(test("Drawing") and type(Drawing.new) == "function"))
+    print("getrenv          : " .. tostring(test("getrenv")))
+    print("identifyexecutor : " .. tostring(test("identifyexecutor")))
+    print("setfpscap        : " .. tostring(test("setfpscap")))
+    print("==========================================")
 end
 
 local function buildUI()
@@ -2794,7 +2793,6 @@ local function buildUI()
         end
     end)
 
-    -- Personnalisation du bouton d'ouverture
     mainWindow:EditOpenButton({
         Title = "Sentinel - Murder Mystery",
         Icon = "door-open",
@@ -2819,6 +2817,14 @@ local function buildUI()
             Title = "Enable WalkSpeed",
             Default = false,
             Callback = function(value)
+                if not isFeatureSupported("walkSpeed") then
+                    pcall(function()
+                        if WindUI and WindUI.Notify then
+                            WindUI:Notify({ Title = "WalkSpeed", Content = "Feature not supported by your executor.", Duration = 5, Icon = "alert-triangle" })
+                        end
+                    end)
+                    return
+                end
                 Config.WalkSpeedEnabled = value
                 setWalkSpeed(value, Config.WalkSpeed)
             end
@@ -2849,6 +2855,14 @@ local function buildUI()
             Title = "Enable JumpPower",
             Default = false,
             Callback = function(value)
+                if not isFeatureSupported("jumpPower") then
+                    pcall(function()
+                        if WindUI and WindUI.Notify then
+                            WindUI:Notify({ Title = "JumpPower", Content = "Feature not supported by your executor.", Duration = 5, Icon = "alert-triangle" })
+                        end
+                    end)
+                    return
+                end
                 Config.JumpPowerEnabled = value
                 setJumpPower(value, Config.JumpPower)
             end
@@ -2873,6 +2887,14 @@ local function buildUI()
             Title = "Infinite Jump",
             Default = false,
             Callback = function(value)
+                if not isFeatureSupported("jumpPower") then
+                    pcall(function()
+                        if WindUI and WindUI.Notify then
+                            WindUI:Notify({ Title = "Infinite Jump", Content = "Feature not supported by your executor.", Duration = 5, Icon = "alert-triangle" })
+                        end
+                    end)
+                    return
+                end
                 Config.InfiniteJump = value
                 setupInfiniteJump(value)
             end
@@ -2882,6 +2904,14 @@ local function buildUI()
             Title = "Spam Jump",
             Default = false,
             Callback = function(value)
+                if not isFeatureSupported("jumpPower") then
+                    pcall(function()
+                        if WindUI and WindUI.Notify then
+                            WindUI:Notify({ Title = "Spam Jump", Content = "Feature not supported by your executor.", Duration = 5, Icon = "alert-triangle" })
+                        end
+                    end)
+                    return
+                end
                 Config.SpamJump = value
                 setupSpamJump(value)
             end
@@ -2899,6 +2929,14 @@ local function buildUI()
             Title = "Enable Custom Gravity",
             Default = false,
             Callback = function(value)
+                if not isFeatureSupported("gravity") then
+                    pcall(function()
+                        if WindUI and WindUI.Notify then
+                            WindUI:Notify({ Title = "Gravity", Content = "Feature not supported by your executor.", Duration = 5, Icon = "alert-triangle" })
+                        end
+                    end)
+                    return
+                end
                 Config.GravityEnabled = value
                 setGravity(value, Config.Gravity)
             end
@@ -2929,6 +2967,14 @@ local function buildUI()
             Title = "Enable Fly",
             Default = false,
             Callback = function(value)
+                if not isFeatureSupported("fly") then
+                    pcall(function()
+                        if WindUI and WindUI.Notify then
+                            WindUI:Notify({ Title = "Fly", Content = "Feature not supported by your executor.", Duration = 5, Icon = "alert-triangle" })
+                        end
+                    end)
+                    return
+                end
                 Config.FlyEnabled = value
                 if value then
                     setFly(true, Config.FlyMethod, Config.FlySpeed)
@@ -2940,7 +2986,7 @@ local function buildUI()
 
         section:Dropdown({
             Title = "Fly Method",
-            Values = { "CFrame", "BodyVelocity + Gyro" },
+            Values = { "CFrame", "BodyVelocity + Gyro", "Seat" },
             Value = "BodyVelocity + Gyro",
             Callback = function(value)
                 Config.FlyMethod = value
@@ -2975,6 +3021,14 @@ local function buildUI()
             Title = "Enable Noclip",
             Default = false,
             Callback = function(value)
+                if not isFeatureSupported("noclip") then
+                    pcall(function()
+                        if WindUI and WindUI.Notify then
+                            WindUI:Notify({ Title = "Noclip", Content = "Feature not supported by your executor.", Duration = 5, Icon = "alert-triangle" })
+                        end
+                    end)
+                    return
+                end
                 Config.NoclipEnabled = value
                 setNoclip(value)
             end
@@ -3016,6 +3070,14 @@ local function buildUI()
             Title = "FOV",
             Default = false,
             Callback = function(value)
+                if not isFeatureSupported("fov") then
+                    pcall(function()
+                        if WindUI and WindUI.Notify then
+                            WindUI:Notify({ Title = "FOV", Content = "Feature not supported by your executor.", Duration = 5, Icon = "alert-triangle" })
+                        end
+                    end)
+                    return
+                end
                 Config.FOVEnabled = value
                 updateFOV()
             end
@@ -3040,6 +3102,14 @@ local function buildUI()
             Title = "Max Camera Dezoom",
             Default = false,
             Callback = function(value)
+                if not isFeatureSupported("dezoom") then
+                    pcall(function()
+                        if WindUI and WindUI.Notify then
+                            WindUI:Notify({ Title = "Dezoom", Content = "Feature not supported by your executor.", Duration = 5, Icon = "alert-triangle" })
+                        end
+                    end)
+                    return
+                end
                 Config.DezoomEnabled = value
                 setupDezoom()
             end
@@ -3075,6 +3145,14 @@ local function buildUI()
             Title = "Auto Grab Gun",
             Default = false,
             Callback = function(value)
+                if not isFeatureSupported("autoGrab") then
+                    pcall(function()
+                        if WindUI and WindUI.Notify then
+                            WindUI:Notify({ Title = "Auto Grab", Content = "Feature not supported by your executor.", Duration = 5, Icon = "alert-triangle" })
+                        end
+                    end)
+                    return
+                end
                 Config.AutoGrabGun = value
                 if value then
                     startAutoGrab()
@@ -3118,6 +3196,14 @@ local function buildUI()
             Title = "Dodge Knife Throw",
             Default = false,
             Callback = function(value)
+                if not isFeatureSupported("dodge") then
+                    pcall(function()
+                        if WindUI and WindUI.Notify then
+                            WindUI:Notify({ Title = "Dodge", Content = "Feature not supported by your executor.", Duration = 5, Icon = "alert-triangle" })
+                        end
+                    end)
+                    return
+                end
                 Config.DodgeKnifeThrow = value
                 if value then
                     startDodge()
@@ -3147,6 +3233,14 @@ local function buildUI()
             Title = "Fake Speed Glitch",
             Default = false,
             Callback = function(value)
+                if not isFeatureSupported("fakeSpeedGlitch") then
+                    pcall(function()
+                        if WindUI and WindUI.Notify then
+                            WindUI:Notify({ Title = "Speed Glitch", Content = "Feature not supported by your executor.", Duration = 5, Icon = "alert-triangle" })
+                        end
+                    end)
+                    return
+                end
                 Config.FakeSpeedGlitch = value
                 setupFakeSpeedGlitch(value)
             end
@@ -3174,6 +3268,14 @@ local function buildUI()
             Title = "Aimlock Murderer",
             Default = Config.AimlockEnabled,
             Callback = function(value)
+                if not isFeatureSupported("aimlock") then
+                    pcall(function()
+                        if WindUI and WindUI.Notify then
+                            WindUI:Notify({ Title = "Aimlock", Content = "Feature not supported by your executor.", Duration = 5, Icon = "alert-triangle" })
+                        end
+                    end)
+                    return
+                end
                 Config.AimlockEnabled = value
                 setupAimlock(value)
             end
@@ -3212,9 +3314,16 @@ local function buildUI()
 
         sheriffSection:Toggle({
             Title = "Silent Aim",
-            Desc = "WAIT! if your executor don't support \"hookmethod\", this might break your gun and knife !",
             Default = Config.SilentAimEnabled,
             Callback = function(value)
+                if not isFeatureSupported("silentAim") then
+                    pcall(function()
+                        if WindUI and WindUI.Notify then
+                            WindUI:Notify({ Title = "Silent Aim", Content = "Your executor does not support hooks. Silent Aim cannot be activated.", Duration = 6, Icon = "alert-triangle" })
+                        end
+                    end)
+                    return
+                end
                 setupSilentAim(value)
             end
         })
@@ -3223,15 +3332,23 @@ local function buildUI()
             Title = "Wall Bang",
             Default = Config.WallBangEnabled,
             Callback = function(value)
+                if not isFeatureSupported("wallBang") then
+                    pcall(function()
+                        if WindUI and WindUI.Notify then
+                            WindUI:Notify({ Title = "Wall Bang", Content = "Your executor does not support hooks. Wall Bang cannot be activated.", Duration = 6, Icon = "alert-triangle" })
+                        end
+                    end)
+                    return
+                end
                 setupWallBang(value)
             end
         })
 
         sheriffSection:Toggle({
-            Title = "Show FOV Circle",
-            Default = Config.SilentAimShowFOV,
+            Title = "Use FOV Circle",
+            Default = Config.SilentAimUseFOV,
             Callback = function(value)
-                Config.SilentAimShowFOV = value
+                Config.SilentAimUseFOV = value
                 updateSilentFOVCircle()
             end
         })
@@ -3243,106 +3360,11 @@ local function buildUI()
             Enabled = true,
             Callback = function(value)
                 Config.SilentAimFOVRadius = value
-                if Config.SilentAimShowFOV then
+                if Config.SilentAimUseFOV then
                     updateSilentFOVCircle()
                 end
             end
         })
-    end
-
-    do
-        local murdererSection = combatTab:Section({
-            Title = "Murderer",
-            Opened = true,
-            Icon = "sword"
-        })
-
-        murdererSection:Toggle({
-            Title = "Kill Aura",
-            Default = Config.KillAuraEnabled,
-            Callback = function(value)
-                Config.KillAuraEnabled = value
-                if value then
-                    ApplyKillAura()
-                    for _, player in ipairs(Players:GetPlayers()) do
-                        if player ~= LocalPlayer then
-                            onPlayerAddedForKillAura(player)
-                        end
-                    end
-                else
-                    ClearKillAura()
-                end
-            end
-        })
-
-        murdererSection:Slider({
-            Title = "Kill Aura Size",
-            Value = { Min = 1, Max = 100, Default = Config.KillAuraSize },
-            Rounding = 0,
-            Enabled = true,
-            Callback = function(value)
-                Config.KillAuraSize = value
-                if Config.KillAuraEnabled then
-                    ApplyKillAura()
-                end
-            end
-        })
-
-        murdererSection:Slider({
-            Title = "Kill Aura Visibility",
-            Value = { Min = 0, Max = 100, Default = 70 },
-            Rounding = 0,
-            Enabled = true,
-            Callback = function(value)
-                Config.KillAuraVisibility = value / 100
-                if Config.KillAuraEnabled then
-                    ApplyKillAura()
-                end
-            end
-        })
-
-        murdererSection:Divider()
-
-        murdererSection:Toggle({
-            Title = "Enable Knife Attack Delay",
-            Default = false,
-            Callback = function(value)
-                Config.KnifeAttackDelayEnabled = value
-            end
-        })
-
-        murdererSection:Slider({
-            Title = "Knife Attack Delay",
-            Value = { Min = 0.1, Max = 2, Default = 0.3 },
-            Rounding = 1,
-            Step = 0.1,
-            Enabled = true,
-            Callback = function(value)
-                Config.KnifeAttackDelay = value
-            end
-        })
-
-        murdererSection:Divider()
-
-        murdererSection:Button({
-            Title = "Kill All",
-            Callback = function()
-                startKillAll()
-            end
-        })
-
-        whitelistSection = murdererSection
-        refreshWhitelist()
-
-        if whitelistRefreshTimer then
-            whitelistRefreshTimer:Disconnect()
-        end
-        whitelistRefreshTimer = task.delay(10, function()
-            while true do
-                refreshWhitelist()
-                task.wait(10)
-            end
-        end)
     end
 
     local farmTab = mainWindow:Tab({ Title = "Auto Farm", Icon = "trending-up" })
@@ -3358,6 +3380,14 @@ local function buildUI()
             Title = "Enable Auto Farm",
             Default = false,
             Callback = function(value)
+                if not isFeatureSupported("autoFarm") then
+                    pcall(function()
+                        if WindUI and WindUI.Notify then
+                            WindUI:Notify({ Title = "Auto Farm", Content = "Feature not supported by your executor.", Duration = 5, Icon = "alert-triangle" })
+                        end
+                    end)
+                    return
+                end
                 Config.AutoFarmEnabled = value
                 if value then
                     startAutoFarm()
@@ -3393,7 +3423,7 @@ local function buildUI()
 
         farmSection:Slider({
             Title = "AutoFarm Speed",
-            Value = { Min = 1, Max = 25, Default = 25 },
+            Value = { Min = 1, Max = 35, Default = 25 },
             Rounding = 0,
             Enabled = true,
             Callback = function(value)
@@ -3458,6 +3488,14 @@ local function buildUI()
         Title = "Fuck in the mouth",
         Default = false,
         Callback = function(value)
+            if not isFeatureSupported("epsteinJutsu") then
+                pcall(function()
+                    if WindUI and WindUI.Notify then
+                        WindUI:Notify({ Title = "Epstein Jutsu", Content = "Feature not supported by your executor.", Duration = 5, Icon = "alert-triangle" })
+                    end
+                end)
+                return
+            end
             if value then
                 if epsteinBackToggle then epsteinBackToggle:Set(false) end
                 epsteinMode = "front"
@@ -3472,6 +3510,14 @@ local function buildUI()
         Title = "Bang",
         Default = false,
         Callback = function(value)
+            if not isFeatureSupported("epsteinJutsu") then
+                pcall(function()
+                    if WindUI and WindUI.Notify then
+                        WindUI:Notify({ Title = "Epstein Jutsu", Content = "Feature not supported by your executor.", Duration = 5, Icon = "alert-triangle" })
+                    end
+                end)
+                return
+            end
             if value then
                 if epsteinFrontToggle then epsteinFrontToggle:Set(false) end
                 epsteinMode = "back"
@@ -3483,12 +3529,36 @@ local function buildUI()
     })
 end
 
--- ========== INITIALISATION ==========
-
 local function initialize()
     if not loadWindUI() then
         warn("[Sentinel] Échec du chargement de WindUI.")
         return
+    end
+
+    local loadTime = os.clock() - startTime
+
+    print("\n============ Account & Info ============")
+    print("User         : " .. userName)
+    print("Account Age  : " .. accountAge)
+    print("Device       : " .. deviceType)
+
+    print("\n============ Script & Executor ============")
+    print("Script Load Time : " .. string.format("%.3f", loadTime) .. "s")
+    print("Executor        : " .. executorName)
+
+    printUncLogs()
+
+    if not hookSupported then
+        pcall(function()
+            if WindUI and WindUI.Notify then
+                WindUI:Notify({
+                    Title = "Warning",
+                    Content = "Hooks are not supported. Silent Aim & Wall Bang will not work.",
+                    Duration = 10,
+                    Icon = "alert-triangle"
+                })
+            end
+        end)
     end
 
     buildUI()
@@ -3500,8 +3570,8 @@ local function initialize()
     pcall(function()
         if mainWindow and WindUI then
             mainWindow:SelectTab(1)
-            WindUI:Notify({ Title = "News", Content = "Welcome to v1", Duration = 5 })
-            WindUI:Notify({ Title = "Sentinel v1.00.00", Content = "Script Loaded successfully,\n Welcome, user.", Duration = 5 })
+            WindUI:Notify({ Title = "News", Content = "Welcome to v1", Duration = 5, Icon = "bell" })
+            WindUI:Notify({ Title = "Sentinel v1.00.00", Content = "Script Loaded successfully,\n Welcome, user.", Duration = 5, Icon = "check" })
         end
     end)
 
@@ -3517,17 +3587,9 @@ local function initialize()
         end
     end
 
-    for _, player in ipairs(Players:GetPlayers()) do
-        if player ~= LocalPlayer then
-            onPlayerAddedForKillAura(player)
-        end
-    end
-    local playerAddedKillAuraConn = Players.PlayerAdded:Connect(onPlayerAddedForKillAura)
-    maid:add(playerAddedKillAuraConn)
-
-    local playerAddedWhitelistConn = Players.PlayerAdded:Connect(refreshWhitelist)
+    local playerAddedWhitelistConn = Players.PlayerAdded:Connect(refreshEpsteinDropdown)
     maid:add(playerAddedWhitelistConn)
-    local playerRemovingWhitelistConn = Players.PlayerRemoving:Connect(refreshWhitelist)
+    local playerRemovingWhitelistConn = Players.PlayerRemoving:Connect(refreshEpsteinDropdown)
     maid:add(playerRemovingWhitelistConn)
 
     task.spawn(function()
@@ -3547,6 +3609,13 @@ local function initialize()
 
     setupFOV()
 
+    task.spawn(function()
+        while true do
+            task.wait(1)
+            refreshESP()
+        end
+    end)
+
     UserInputService.InputBegan:Connect(function(input, gameProcessed)
         if gameProcessed then return end
         if input.KeyCode == Enum.KeyCode[Config.GrabKeybind] then
@@ -3559,7 +3628,7 @@ local function initialize()
                 firstHide = false
                 pcall(function()
                     if WindUI then
-                        WindUI:Notify({ Title = "Keybind", Content = "Press K to toggle interface", Duration = 3 })
+                        WindUI:Notify({ Title = "Keybind", Content = "Press K to toggle interface", Duration = 3, Icon = "key" })
                     end
                 end)
             end
