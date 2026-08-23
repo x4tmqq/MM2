@@ -67,7 +67,10 @@ local Config = {
     AutoGrabGun = false,
     GrabMethod = "TP to Gun",
     DodgeKnifeThrow = false,
-    DodgeMethod = "SafePlace",
+    DodgeVelocity = 75,
+    DodgeJumpPower = 50,
+    DodgeDetectionRadius = 40,
+    DodgeCooldown = 0.8,
     GrabKeybind = "Y",
     AimlockEnabled = false,
     AimlockVisibleCheck = true,
@@ -85,6 +88,12 @@ local Config = {
     FakeSpeedGlitch = false,
     FakeSpeedGlitchPower = 50,
     WallBangEnabled = false,
+    KnifeAttackDelayEnabled = false,
+    KnifeAttackDelay = 0.3,
+    KnifeSilentAimEnabled = false,
+    KnifeSilentAimUseFOV = false,
+    KnifeSilentAimFOVRadius = 75,
+    InstantKnifeThrowEnabled = false,
 }
 
 local highlightCache = {}
@@ -147,13 +156,10 @@ local autoGrabConnection = nil
 local autoGrabRunning = false
 local lastGrabTime = 0
 
-local dodgeKnifeList = {}
+local lastDodgeTime = -0.8
 local dodgeActive = false
-local safePlaceOriginalPos = nil
-local isInSafePlace = false
-local safePlaceTimer = nil
-local dodgeDescendantAddedConn = nil
-local dodgeWeaponConnection = nil
+local dodgeKnifeAddedConnection = nil
+local dodgeHeartbeatConnection = nil
 
 local firstHide = true
 
@@ -1180,195 +1186,109 @@ local function handleGrabAction()
     end
 end
 
-local function getKnifeDirectionFromThrow(handleCFrame, targetCFrame)
-    return (targetCFrame.Position - handleCFrame.Position).Unit
-end
-
-local function performDodgeWithDirection(dir)
-    local char = LocalPlayer.Character
-    if not char then return end
-    local root = char:FindFirstChild("HumanoidRootPart")
-    if not root then return end
-
-    if Config.DodgeMethod == "SafePlace" then
-        performSafePlace()
-    else
-        local up = Vector3.new(0, 1, 0)
-        local lateral = dir:Cross(up)
-        if lateral.Magnitude < 0.01 then
-            lateral = Vector3.new(1, 0, 0)
-        end
-        lateral = lateral.Unit
-        local side = math.random(0, 1) == 0 and 1 or -1
-        local dodgeDir = lateral * side
-        local speed = 40
-        local velocity = dodgeDir * speed + Vector3.new(0, 15, 0)
-        root.Velocity = velocity
-    end
-end
-
-local function setupDescendantDodge()
-    dodgeDescendantAddedConn = Workspace.DescendantAdded:Connect(function(child)
-        if child:IsA("BasePart") and child.Name == "KnifeVisual" then
-            handleKnifeAdded(child)
-        end
-    end)
-end
-
-local function setupDodgeHook()
-    if dodgeDescendantAddedConn then
-        dodgeDescendantAddedConn:Disconnect()
-        dodgeDescendantAddedConn = nil
-    end
-    if dodgeWeaponConnection then
-        dodgeWeaponConnection:Disconnect()
-        dodgeWeaponConnection = nil
-    end
-
-    if not Config.DodgeKnifeThrow then return end
-
-    local ws = getWeaponService()
-    if ws and ws.KnifeThrown then
-        dodgeWeaponConnection = ws.KnifeThrown.Event:Connect(function(player, handleCFrame, targetCFrame)
-            if Config.DodgeKnifeThrow then
-                local dir = getKnifeDirectionFromThrow(handleCFrame, targetCFrame)
-                performDodgeWithDirection(dir)
-            end
-        end)
-        return
-    end
-
-    setupDescendantDodge()
-end
-
-local function performSafePlace()
-    if isInSafePlace then return end
-    local char = LocalPlayer.Character
-    if not char then return end
-    local root = char:FindFirstChild("HumanoidRootPart")
-    if not root then return end
-    safePlaceOriginalPos = root.Position
-    local safePos = Vector3.new(root.Position.X, 1000, root.Position.Z)
-    root.CFrame = CFrame.new(safePos)
-    isInSafePlace = true
-    if safePlaceTimer then
-        safePlaceTimer:Disconnect()
-        safePlaceTimer = nil
-    end
-    safePlaceTimer = task.delay(5, function()
-        returnFromSafePlace()
-    end)
-end
-
-local function returnFromSafePlace()
-    if not isInSafePlace then return end
-    if safePlaceTimer then
-        safePlaceTimer:Disconnect()
-        safePlaceTimer = nil
-    end
-    local char = LocalPlayer.Character
-    if not char then return end
-    local root = char:FindFirstChild("HumanoidRootPart")
-    if not root then return end
-    if safePlaceOriginalPos then
-        root.CFrame = CFrame.new(safePlaceOriginalPos)
-        safePlaceOriginalPos = nil
-    end
-    isInSafePlace = false
-end
-
-local function getKnifeDirection(knife)
-    local dir = knife:GetAttribute("Direction")
-    if type(dir) == "Vector3" then
-        return dir
+local function getKnifePosition(knife)
+    if knife.PrimaryPart then return knife.PrimaryPart.Position end
+    for _, child in knife:GetChildren() do
+        if child:IsA("BasePart") then return child.Position end
     end
     return nil
 end
 
-local function performDodge(knife)
+local function getCharacterForDodge()
     local char = LocalPlayer.Character
-    if not char then return end
-    local root = char:FindFirstChild("HumanoidRootPart")
-    if not root then return end
-    local dir = getKnifeDirection(knife) or Vector3.new(0,0,1)
-    local up = Vector3.new(0, 1, 0)
-    local lateral = dir:Cross(up)
-    if lateral.Magnitude < 0.01 then
-        lateral = Vector3.new(1, 0, 0)
-    end
-    lateral = lateral.Unit
-    local side = math.random(0, 1) == 0 and 1 or -1
-    local dodgeDir = lateral * side
-    local speed = 40
-    local velocity = dodgeDir * speed + Vector3.new(0, 15, 0)
-    root.Velocity = velocity
+    if not char then return nil, nil end
+    local hrp = char:FindFirstChild("HumanoidRootPart")
+    local hum = char:FindFirstChild("Humanoid")
+    if not hrp or not hum or hum.Health <= 0 then return nil, nil end
+    return hrp, hum
 end
 
-local function isInKnifeList(knife)
-    for _, k in ipairs(dodgeKnifeList) do
-        if k == knife then
-            return true
-        end
+local function getDodgeSideDirection(knifeDirection, hrpPosition, knifePosition)
+    local perp = knifeDirection:Cross(Vector3.new(0, 1, 0))
+    if perp.Magnitude < 0.01 then
+        perp = Vector3.new(1, 0, 0)
+    else
+        perp = perp.Unit
     end
-    return false
+    local toKnife = Vector3.new(knifePosition.X - hrpPosition.X, 0, knifePosition.Z - hrpPosition.Z)
+    if perp:Dot(toKnife) > 0 then
+        perp = -perp
+    end
+    return perp
 end
 
-local function removeKnifeFromList(knife)
-    for i, k in ipairs(dodgeKnifeList) do
-        if k == knife then
-            table.remove(dodgeKnifeList, i)
-            break
-        end
-    end
-    if Config.DodgeMethod == "SafePlace" and isInSafePlace and #dodgeKnifeList == 0 then
-        returnFromSafePlace()
-    end
-end
-
-local function handleKnifeAdded(knife)
+local function tryDodge(knife)
     if not Config.DodgeKnifeThrow then return end
-    if not knife:IsA("BasePart") or knife.Name ~= "KnifeVisual" then return end
-    if isInKnifeList(knife) then return end
+    if not knife or knife.Parent == nil then return end
 
-    table.insert(dodgeKnifeList, knife)
+    local direction = knife:GetAttribute("Direction")
+    if not direction then return end
 
-    local destroyConn
-    destroyConn = knife.AncestryChanged:Connect(function()
-        if not knife.Parent then
-            destroyConn:Disconnect()
-            removeKnifeFromList(knife)
+    local knifePos = getKnifePosition(knife)
+    if not knifePos then return end
+
+    local hrp, hum = getCharacterForDodge()
+    if not hrp or not hum then return end
+
+    local toMe = hrp.Position - knifePos
+    local dist = toMe.Magnitude
+    if dist > Config.DodgeDetectionRadius then return end
+
+    local dot = direction:Dot(toMe.Unit)
+    if dot < 0.6 then return end
+
+    local now = os.clock()
+    if now - lastDodgeTime < Config.DodgeCooldown then return end
+    lastDodgeTime = now
+
+    local dodgeDir = getDodgeSideDirection(direction, hrp.Position, knifePos)
+    
+    local currentVel = hrp.AssemblyLinearVelocity
+    hrp.AssemblyLinearVelocity = Vector3.new(
+        dodgeDir.X * Config.DodgeVelocity,
+        currentVel.Y,
+        dodgeDir.Z * Config.DodgeVelocity
+    )
+    
+    hum.Jump = true
+end
+
+local function setupDodge(enabled)
+    if dodgeKnifeAddedConnection then
+        dodgeKnifeAddedConnection:Disconnect()
+        dodgeKnifeAddedConnection = nil
+    end
+    if dodgeHeartbeatConnection then
+        dodgeHeartbeatConnection:Disconnect()
+        dodgeHeartbeatConnection = nil
+    end
+    dodgeActive = false
+
+    if not enabled then return end
+
+    dodgeActive = true
+    lastDodgeTime = -Config.DodgeCooldown
+
+    dodgeKnifeAddedConnection = CollectionService:GetInstanceAddedSignal("ThrowingKnife"):Connect(function(knife)
+        task.defer(function()
+            tryDodge(knife)
+        end)
+    end)
+
+    dodgeHeartbeatConnection = RunService.Heartbeat:Connect(function()
+        if not Config.DodgeKnifeThrow then return end
+        local now = os.clock()
+        if now - lastDodgeTime < Config.DodgeCooldown then return end
+        local hrp, _ = getCharacterForDodge()
+        if not hrp then return end
+        for _, knife in CollectionService:GetTagged("ThrowingKnife") do
+            tryDodge(knife)
+            break
         end
     end)
 
-    if Config.DodgeMethod == "SafePlace" then
-        performSafePlace()
-    elseif Config.DodgeMethod == "Dodge" then
-        performDodge(knife)
-    end
-end
-
-local function startDodge()
-    stopDodge()
-    if not Config.DodgeKnifeThrow then return end
-    dodgeActive = true
-    table.clear(dodgeKnifeList)
-    setupDodgeHook()
-end
-
-local function stopDodge()
-    if dodgeDescendantAddedConn then
-        dodgeDescendantAddedConn:Disconnect()
-        dodgeDescendantAddedConn = nil
-    end
-    if dodgeWeaponConnection then
-        dodgeWeaponConnection:Disconnect()
-        dodgeWeaponConnection = nil
-    end
-    dodgeActive = false
-    if isInSafePlace then
-        returnFromSafePlace()
-    end
-    table.clear(dodgeKnifeList)
+    maid:add(dodgeKnifeAddedConnection)
+    maid:add(dodgeHeartbeatConnection)
 end
 
 local function getCoinObjects()
@@ -1964,7 +1884,7 @@ local function checkHookSupport()
     return ok and result == true
 end
 
-local hookSupported = checkHookSupport()
+local hookSupported = true
 
 local executorName = "Unknown"
 local idFunc = identifyexecutor
@@ -2032,6 +1952,8 @@ local function isFeatureSupported(featureName)
         epsteinJutsu = true,
         esp = true,
         teleport = true,
+        knifeSilentAim = hookSupported,
+        instantKnifeThrow = true,
     }
     return features[featureName] or false
 end
@@ -2249,20 +2171,6 @@ local function setupSilentAim(enabled)
         return
     end
     if enabled then
-        if not hookSupported then
-            pcall(function()
-                if WindUI and WindUI.Notify then
-                    WindUI:Notify({
-                        Title = "Silent Aim",
-                        Content = "Your executor does not support hooks. Silent Aim cannot be activated.",
-                        Duration = 8,
-                        Icon = "alert-triangle"
-                    })
-                end
-            end)
-            Config.SilentAimEnabled = false
-            return
-        end
         if not originalGetMouseTarget then
             originalGetMouseTarget = ws.GetMouseTargetCFrame
             originalGetTargetPosition = ws.GetTargetPosition
@@ -2717,32 +2625,380 @@ function buildTeleportUI()
 end
 
 local function printUncLogs()
-    local function test(name)
-        local ok, result = pcall(function()
-            local fn = getfenv()[name]
-            if fn == nil then
-                return false
-            end
-            return true
-        end)
-        return ok and result or false
+    local function test(name, fn)
+        local ok, result = pcall(fn)
+        if ok then
+            return result ~= nil
+        else
+            return false
+        end
     end
 
     print("\n============ UNC Test ============")
-    print("hookmetamethod   : " .. tostring(test("hookmetamethod")))
-    print("hookfunction     : " .. tostring(test("hookfunction")))
-    print("__namecall       : " .. tostring(test("getnamecallmethod") and test("setnamecallmethod")))
-    print("__newclosure     : " .. tostring(test("newcclosure")))
-    print("getfenv          : " .. tostring(test("getfenv")))
-    print("Drawing.new      : " .. tostring(test("Drawing") and type(Drawing.new) == "function"))
-    print("getrenv          : " .. tostring(test("getrenv")))
-    print("identifyexecutor : " .. tostring(test("identifyexecutor")))
-    print("setfpscap        : " .. tostring(test("setfpscap")))
+    local function check(label, fn)
+        local exists = test(label, fn)
+        local icon = exists and "✅" or "❌"
+        print(icon .. " " .. label)
+    end
+
+    check("hookmetamethod", function() return hookmetamethod ~= nil end)
+    check("hookfunction", function() return hookfunction ~= nil end)
+    check("__namecall", function() return getnamecallmethod ~= nil end)
+    check("__newclosure", function() return newcclosure ~= nil end)
+    check("getfenv", function() return getfenv ~= nil end)
+    check("Drawing.new", function() return Drawing and Drawing.new ~= nil end)
+    check("getrenv", function() return getrenv ~= nil end)
+    check("identifyexecutor", function() return identifyexecutor ~= nil end)
+    check("setfpscap", function() return setfpscap ~= nil end)
     print("==========================================")
 end
 
+local knifeOverrideConnection = nil
+local knifeOriginalNamecall = nil
+local knifeHookActive = false
+
+local function getKnifeTargetCFrame()
+    if not Config.KnifeSilentAimEnabled then return nil end
+
+    local cam = Workspace.CurrentCamera
+    if not cam then return nil end
+
+    local char = LocalPlayer.Character
+    if not char then return nil end
+    local myPos = char:FindFirstChild("HumanoidRootPart")
+    if not myPos then return nil end
+
+    local screenCenter = Vector2.new(cam.ViewportSize.X/2, cam.ViewportSize.Y/2)
+    local target = nil
+    local shortestDistance = math.huge
+
+    for _, v in pairs(Players:GetPlayers()) do
+        if v == LocalPlayer then continue end
+
+        local charTarget = v.Character
+        if not charTarget then continue end
+        local hrp = charTarget:FindFirstChild("HumanoidRootPart")
+        if not hrp then continue end
+
+        if Config.KnifeSilentAimUseFOV then
+            local pos, onScreen = cam:WorldToViewportPoint(hrp.Position)
+            if not onScreen then continue end
+            local magnitude = (Vector2.new(pos.X, pos.Y) - screenCenter).Magnitude
+            if magnitude > Config.KnifeSilentAimFOVRadius then continue end
+        end
+
+        local dist = (hrp.Position - myPos.Position).Magnitude
+        if dist < shortestDistance then
+            shortestDistance = dist
+            target = hrp
+        end
+    end
+
+    if target then
+        return CFrame.new(target.Position)
+    end
+
+    local ws = getWeaponService()
+    if ws then
+        return ws:GetMouseTargetCFrame()
+    end
+    return nil
+end
+
+local function setupKnifeHook()
+    if knifeHookActive then
+        return
+    end
+
+    if not Config.KnifeSilentAimEnabled then
+        if knifeOriginalNamecall then
+            local mt = getrawmetatable(game)
+            if mt then
+                setreadonly(mt, false)
+                mt.__namecall = knifeOriginalNamecall
+                setreadonly(mt, true)
+                knifeOriginalNamecall = nil
+            end
+        end
+        knifeHookActive = false
+        return
+    end
+
+    if not hookSupported then
+        setupKnifeOverrideFallback()
+        return
+    end
+
+    local mt = getrawmetatable(game)
+    if not mt then
+        return
+    end
+
+    setreadonly(mt, false)
+    knifeOriginalNamecall = mt.__namecall
+
+    mt.__namecall = newcclosure(function(self, ...)
+        local method = getnamecallmethod()
+        if method == "FireServer" and self.Name == "KnifeThrown" then
+            local args = {...}
+            if args[2] and type(args[2]) == "CFrame" then
+                local newTarget = getKnifeTargetCFrame()
+                if newTarget then
+                    args[2] = newTarget
+                end
+            end
+            if knifeOriginalNamecall then
+                return knifeOriginalNamecall(self, unpack(args))
+            else
+                return self[method](self, unpack(args))
+            end
+        end
+        if knifeOriginalNamecall then
+            return knifeOriginalNamecall(self, ...)
+        else
+            return self[method](self, ...)
+        end
+    end)
+
+    setreadonly(mt, true)
+    knifeHookActive = true
+
+    local knife = LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("Knife") or LocalPlayer.Backpack:FindFirstChild("Knife")
+    if knife then
+        if Config.InstantKnifeThrowEnabled then
+            knife:SetAttribute("ThrowSpeed", 0.01)
+        else
+            knife:SetAttribute("ThrowSpeed", 1)
+        end
+    end
+end
+
+local function setupKnifeOverrideFallback()
+    if knifeOverrideConnection then
+        knifeOverrideConnection:Disconnect()
+        knifeOverrideConnection = nil
+    end
+
+    if not Config.KnifeSilentAimEnabled and not Config.InstantKnifeThrowEnabled then
+        local char = LocalPlayer.Character
+        local knife = char and char:FindFirstChild("Knife") or LocalPlayer.Backpack:FindFirstChild("Knife")
+        if knife then
+            local knifeClient = knife:FindFirstChildOfClass("LocalScript")
+            if knifeClient then
+                knifeClient.Disabled = false
+            end
+            knife:SetAttribute("ThrowSpeed", 1)
+        end
+        return
+    end
+
+    local knife = waitForKnife()
+    if not knife then
+        return
+    end
+
+    local knifeThrown = knife:FindFirstChild("Events") and knife.Events:FindFirstChild("KnifeThrown")
+    local handle = knife:FindFirstChild("Handle")
+    if not knifeThrown or not handle then
+        return
+    end
+
+    local ws = getWeaponService()
+    if not ws then
+        return
+    end
+
+    local function onInputBegan(input, gp)
+        if gp then
+            return
+        end
+        if input.UserInputType == Enum.UserInputType.MouseButton2 then
+            local knifeClient = knife:FindFirstChildOfClass("LocalScript")
+            if knifeClient then
+                knifeClient.Disabled = true
+                task.defer(function()
+                    if knifeClient then
+                        knifeClient.Disabled = false
+                    end
+                end)
+            end
+
+            local target = Config.KnifeSilentAimEnabled and getKnifeTargetCFrame() or ws:GetMouseTargetCFrame()
+            if target then
+                knifeThrown:FireServer(handle.CFrame, target)
+            end
+        end
+    end
+
+    knifeOverrideConnection = UserInputService.InputBegan:Connect(onInputBegan)
+    maid:add(knifeOverrideConnection)
+
+    if Config.InstantKnifeThrowEnabled then
+        knife:SetAttribute("ThrowSpeed", 0.01)
+    else
+        knife:SetAttribute("ThrowSpeed", 1)
+    end
+end
+
+local function setupKnifeOverrides()
+    if hookSupported then
+        setupKnifeHook()
+    else
+        setupKnifeOverrideFallback()
+    end
+end
+
+local function updateKnifeDelay()
+    local char = LocalPlayer.Character
+    if not char then
+        return
+    end
+    local knife = char:FindFirstChild("Knife") or LocalPlayer.Backpack:FindFirstChild("Knife")
+    if not knife then
+        return
+    end
+    if Config.InstantKnifeThrowEnabled or Config.KnifeSilentAimEnabled then
+        knife:SetAttribute("ThrowSpeed", 0.01)
+    elseif Config.KnifeAttackDelayEnabled then
+        local delay = Config.KnifeAttackDelay
+        local attr = math.max(delay / 2, 0.05)
+        knife:SetAttribute("ThrowSpeed", attr)
+    else
+        knife:SetAttribute("ThrowSpeed", 1)
+    end
+end
+
+local instantThrowToggle = nil
+
+local function toggleKnifeSilentAim(value)
+    if value and not isFeatureSupported("knifeSilentAim") then
+        pcall(function()
+            if WindUI and WindUI.Notify then
+                WindUI:Notify({
+                    Title = "Knife Silent Aim",
+                    Content = "Your executor does not support hooks. Using fallback.",
+                    Duration = 8,
+                    Icon = "alert-triangle"
+                })
+            end
+        end)
+        Config.KnifeSilentAimEnabled = false
+        return
+    end
+    Config.KnifeSilentAimEnabled = value
+
+    if value then
+        Config.InstantKnifeThrowEnabled = true
+        if instantThrowToggle then
+            instantThrowToggle:Set(true)
+            instantThrowToggle:Lock()
+        end
+    else
+        Config.InstantKnifeThrowEnabled = false
+        if instantThrowToggle then
+            instantThrowToggle:Set(false)
+            instantThrowToggle:Unlock()
+        end
+    end
+
+    setupKnifeOverrides()
+    updateKnifeDelay()
+    updateKnifeFOVCircle()
+end
+
+local function toggleInstantKnifeThrow(value)
+    if Config.KnifeSilentAimEnabled then
+        Config.InstantKnifeThrowEnabled = true
+        if instantThrowToggle then
+            instantThrowToggle:Set(true)
+            instantThrowToggle:Lock()
+        end
+        return
+    end
+
+    Config.InstantKnifeThrowEnabled = value
+    setupKnifeOverrides()
+    updateKnifeDelay()
+end
+
+local knifeFOVCircle = nil
+local knifeFOVCircleUpdateConn = nil
+
+local function updateKnifeFOVCircle()
+    if knifeFOVCircleUpdateConn then
+        knifeFOVCircleUpdateConn:Disconnect()
+        knifeFOVCircleUpdateConn = nil
+    end
+    if Config.KnifeSilentAimEnabled and Config.KnifeSilentAimUseFOV then
+        if not knifeFOVCircle and Drawing then
+            knifeFOVCircle = Drawing.new("Circle")
+            knifeFOVCircle.Thickness = 1
+            knifeFOVCircle.Transparency = 1
+            knifeFOVCircle.Color = Color3.fromRGB(255, 255, 255)
+            knifeFOVCircle.NumSides = 64
+        end
+        if knifeFOVCircle then
+            knifeFOVCircleUpdateConn = RunService.RenderStepped:Connect(function()
+                local cam = Workspace.CurrentCamera
+                if not cam then
+                    return
+                end
+                knifeFOVCircle.Position = Vector2.new(cam.ViewportSize.X/2, cam.ViewportSize.Y/2)
+                knifeFOVCircle.Radius = Config.KnifeSilentAimFOVRadius
+                knifeFOVCircle.Visible = true
+            end)
+        end
+    else
+        if knifeFOVCircle then
+            knifeFOVCircle.Visible = false
+        end
+    end
+end
+
+local function waitForKnife()
+    local player = LocalPlayer
+    local function check()
+        local c = player.Character
+        if c then
+            local k = c:FindFirstChild("Knife") or player.Backpack:FindFirstChild("Knife")
+            if k then
+                return k
+            end
+        end
+        return nil
+    end
+    local k = check()
+    if k then
+        return k
+    end
+    local conn
+    local result = nil
+    conn = player.CharacterAdded:Connect(function(newChar)
+        local k2 = newChar:FindFirstChild("Knife") or player.Backpack:FindFirstChild("Knife")
+        if k2 then
+            result = k2
+            conn:Disconnect()
+        end
+    end)
+    local conn2 = player.Backpack.ChildAdded:Connect(function(child)
+        if child.Name == "Knife" then
+            result = child
+            conn2:Disconnect()
+            if conn then
+                conn:Disconnect()
+            end
+        end
+    end)
+    repeat
+        task.wait()
+    until result ~= nil
+    return result
+end
+
 local function buildUI()
-    if not WindUI then return end
+    if not WindUI then
+        return
+    end
 
     WindUI:AddTheme({
         Name = "Amnethy",
@@ -3192,7 +3448,7 @@ local function buildUI()
 
         innocentSection:Divider()
 
-        local dodgeToggle = innocentSection:Toggle({
+        innocentSection:Toggle({
             Title = "Dodge Knife Throw",
             Default = false,
             Callback = function(value)
@@ -3205,25 +3461,17 @@ local function buildUI()
                     return
                 end
                 Config.DodgeKnifeThrow = value
-                if value then
-                    startDodge()
-                else
-                    stopDodge()
-                end
+                setupDodge(value)
             end
         })
-        dodgeToggle:Lock()
 
-        innocentSection:Dropdown({
-            Title = "Dodge Method",
-            Values = { "SafePlace", "Dodge" },
-            Value = "Dodge",
+        innocentSection:Slider({
+            Title = "Dodge Power",
+            Value = { Min = 10, Max = 200, Default = 75 },
+            Rounding = 0,
+            Enabled = true,
             Callback = function(value)
-                Config.DodgeMethod = value
-                if Config.DodgeKnifeThrow then
-                    stopDodge()
-                    startDodge()
-                end
+                Config.DodgeVelocity = value
             end
         })
 
@@ -3266,6 +3514,7 @@ local function buildUI()
 
         sheriffSection:Toggle({
             Title = "Aimlock Murderer",
+            Desc = "Camera locks onto the murderer's head.",
             Default = Config.AimlockEnabled,
             Callback = function(value)
                 if not isFeatureSupported("aimlock") then
@@ -3283,6 +3532,7 @@ local function buildUI()
 
         sheriffSection:Toggle({
             Title = "Visible Check (Aimlock)",
+            Desc = "Only locks onto the murderer if he's actually visible",
             Default = Config.AimlockVisibleCheck,
             Callback = function(value)
                 Config.AimlockVisibleCheck = value
@@ -3314,6 +3564,7 @@ local function buildUI()
 
         sheriffSection:Toggle({
             Title = "Silent Aim",
+            Desc = "Shoot anywhere, bullets still hit the murderer.",
             Default = Config.SilentAimEnabled,
             Callback = function(value)
                 if not isFeatureSupported("silentAim") then
@@ -3328,8 +3579,9 @@ local function buildUI()
             end
         })
 
-        sheriffSection:Toggle({
+        local wallBangToggle = sheriffSection:Toggle({
             Title = "Wall Bang",
+            Desc = "Allow you to Shoot through walls",
             Default = Config.WallBangEnabled,
             Callback = function(value)
                 if not isFeatureSupported("wallBang") then
@@ -3343,6 +3595,7 @@ local function buildUI()
                 setupWallBang(value)
             end
         })
+        wallBangToggle:Lock()
 
         sheriffSection:Toggle({
             Title = "Use FOV Circle",
@@ -3367,6 +3620,65 @@ local function buildUI()
         })
     end
 
+    do
+        local murdererSection = combatTab:Section({
+            Title = "Murderer",
+            Opened = true,
+            Icon = "sword"
+        })
+
+        local knifeSilentToggle = murdererSection:Toggle({
+            Title = "Knife Silent Aim",
+            Desc = "Knife throws automatically aim at the closest player (any role).",
+            Default = Config.KnifeSilentAimEnabled,
+            Callback = function(value)
+                toggleKnifeSilentAim(value)
+            end
+        })
+
+        local fovToggle = murdererSection:Toggle({
+            Title = "Use FOV Circle",
+            Default = Config.KnifeSilentAimUseFOV,
+            Callback = function(value)
+                Config.KnifeSilentAimUseFOV = value
+                updateKnifeFOVCircle()
+            end
+        })
+
+        murdererSection:Slider({
+            Title = "FOV Radius",
+            Value = { Min = 10, Max = 500, Default = Config.KnifeSilentAimFOVRadius },
+            Rounding = 0,
+            Enabled = true,
+            Callback = function(value)
+                Config.KnifeSilentAimFOVRadius = value
+                updateKnifeFOVCircle()
+            end
+        })
+
+        murdererSection:Divider()
+
+        instantThrowToggle = murdererSection:Toggle({
+            Title = "Instant Knife Throw",
+            Desc = "Throw knife instantly with right-click.",
+            Default = Config.InstantKnifeThrowEnabled,
+            Callback = function(value)
+                if Config.KnifeSilentAimEnabled then
+                    Config.InstantKnifeThrowEnabled = true
+                    instantThrowToggle:Set(true)
+                    instantThrowToggle:Lock()
+                    return
+                end
+                toggleInstantKnifeThrow(value)
+            end
+        })
+
+        if Config.KnifeSilentAimEnabled then
+            instantThrowToggle:Set(true)
+            instantThrowToggle:Lock()
+        end
+    end
+
     local farmTab = mainWindow:Tab({ Title = "Auto Farm", Icon = "trending-up" })
 
     do
@@ -3378,6 +3690,7 @@ local function buildUI()
 
         farmSection:Toggle({
             Title = "Enable Auto Farm",
+            Desc = "fastest mm2 auto farm (w x4tmq)",
             Default = false,
             Callback = function(value)
                 if not isFeatureSupported("autoFarm") then
@@ -3398,8 +3711,8 @@ local function buildUI()
         })
 
         farmSection:Dropdown({
-            Title = "AutoFarm Stuff",
-            Values = { "Coins", "Candy", "Both" },
+            Title = "Stuff to farm",
+            Values = { "Coins" },
             Value = "Coins",
             Callback = function(value)
                 Config.AutoFarmType = value
@@ -3419,11 +3732,9 @@ local function buildUI()
             end
         })
 
-        farmSection:Divider()
-
         farmSection:Slider({
             Title = "AutoFarm Speed",
-            Value = { Min = 1, Max = 35, Default = 25 },
+            Value = { Min = 1, Max = 25, Default = 25 },
             Rounding = 0,
             Enabled = true,
             Callback = function(value)
@@ -3497,7 +3808,9 @@ local function buildUI()
                 return
             end
             if value then
-                if epsteinBackToggle then epsteinBackToggle:Set(false) end
+                if epsteinBackToggle then
+                    epsteinBackToggle:Set(false)
+                end
                 epsteinMode = "front"
                 startEpsteinJutsu()
             else
@@ -3519,7 +3832,9 @@ local function buildUI()
                 return
             end
             if value then
-                if epsteinFrontToggle then epsteinFrontToggle:Set(false) end
+                if epsteinFrontToggle then
+                    epsteinFrontToggle:Set(false)
+                end
                 epsteinMode = "back"
                 startEpsteinJutsu()
             else
@@ -3602,9 +3917,27 @@ local function initialize()
     local char = LocalPlayer.Character
     if char then
         setupCharacter(char)
+        updateKnifeDelay()
+        setupKnifeOverrides()
     end
 
-    local charAddedConn = LocalPlayer.CharacterAdded:Connect(setupCharacter)
+    local charAddedConn = LocalPlayer.CharacterAdded:Connect(function(char)
+        setupCharacter(char)
+        updateKnifeDelay()
+        task.spawn(function()
+            local waitCount = 0
+            while waitCount < 50 do
+                task.wait(0.1)
+                waitCount = waitCount + 1
+                local k = char:FindFirstChild("Knife") or LocalPlayer.Backpack:FindFirstChild("Knife")
+                if k then
+                    setupKnifeOverrides()
+                    return
+                end
+            end
+            setupKnifeOverrides()
+        end)
+    end)
     maid:add(charAddedConn)
 
     setupFOV()
@@ -3617,7 +3950,9 @@ local function initialize()
     end)
 
     UserInputService.InputBegan:Connect(function(input, gameProcessed)
-        if gameProcessed then return end
+        if gameProcessed then
+            return
+        end
         if input.KeyCode == Enum.KeyCode[Config.GrabKeybind] then
             if input.UserInputType == Enum.UserInputType.Keyboard then
                 handleGrabAction()
