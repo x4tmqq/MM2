@@ -203,6 +203,13 @@ local epsteinFrontToggle = nil
 local epsteinBackToggle = nil
 local epsteinMode = "front"
 
+local epsteinSuckToggle = nil
+local epsteinSuckRunning = false
+local epsteinSuckConnection = nil
+local epsteinSuckBodyPos = nil
+local epsteinSuckTrack = nil
+local epsteinSuckMode = "front"
+
 local WeaponService = nil
 local function getWeaponService()
     if WeaponService then return WeaponService end
@@ -1369,36 +1376,31 @@ if CoinCollectedEvent then
                             WindUI:Notify({ Title = "AutoFarm", Content = "Bag full! Resetting...", Duration = 2, Icon = "refresh-cw" })
                         end
                     end)
-                    if Config.AutoFlingMurderer then
-                        for _, p in ipairs(Players:GetPlayers()) do
-                            if p ~= LocalPlayer and p.Character and p.Character:FindFirstChild("Knife") then
-                                local murderer = p
-                                pcall(function()
-                                    if WindUI and WindUI.Notify then
-                                        WindUI:Notify({ Title = "AutoFarm", Content = "Flinging murderer: " .. murderer.Name, Duration = 2, Icon = "rocket" })
-                                    end
-                                end)
-                                local char = LocalPlayer.Character
-                                if char and char:FindFirstChild("HumanoidRootPart") then
-                                    local hrp = char.HumanoidRootPart
-                                    local targetHrp = murderer.Character and murderer.Character:FindFirstChild("HumanoidRootPart")
-                                    if targetHrp then
-                                        hrp.CFrame = targetHrp.CFrame + Vector3.new(0, 5, 0)
-                                        task.wait(0.1)
-                                        hrp.Velocity = Vector3.new(0, 100, 0)
-                                        task.wait(0.1)
-                                        hrp.Velocity = Vector3.new(0, 0, 0)
-                                    end
-                                end
-                                break
-                            end
-                        end
-                    end
                     if LocalPlayer.Character then
                         LocalPlayer.Character:BreakJoints()
                         LocalPlayer.CharacterAdded:Wait()
                     end
                     candyCount = 0
+                end
+                if Config.AutoFlingMurderer and roundActive then
+                    local murderer = nil
+                    for _, p in ipairs(Players:GetPlayers()) do
+                        if p ~= LocalPlayer and p.Character then
+                            local role, _ = getPlayerRole(p)
+                            if role == "Murderer" then
+                                murderer = p
+                                break
+                            end
+                        end
+                    end
+                    if murderer then
+                        pcall(function()
+                            if WindUI and WindUI.Notify then
+                                WindUI:Notify({ Title = "AutoFarm", Content = "Flinging murderer: " .. murderer.Name, Duration = 2, Icon = "rocket" })
+                            end
+                        end)
+                        flingPlayer(murderer)
+                    end
                 end
             end
         end
@@ -1758,6 +1760,126 @@ local function stopEpsteinJutsu()
                 part.CanCollide = true
             end
         end
+    end
+end
+
+local function startEpsteinSuck()
+    if epsteinSuckRunning then
+        stopEpsteinSuck()
+    end
+    local char = LocalPlayer.Character
+    if not char then return end
+    local root = char:FindFirstChild("HumanoidRootPart")
+    local humanoid = char:FindFirstChildOfClass("Humanoid")
+    if not root or not humanoid then return end
+
+    if not epsteinTarget or not epsteinTarget.Character then
+        pcall(function()
+            if WindUI and WindUI.Notify then
+                WindUI:Notify({ Title = "Suck", Content = "No target selected!", Duration = 2, Icon = "user-x" })
+            end
+        end)
+        return
+    end
+
+    if not epsteinNoclipConn then
+        epsteinNoclipConn = RunService.Heartbeat:Connect(function()
+            epsteinEnableNoclip()
+        end)
+    end
+
+    epsteinSuckBodyPos = Instance.new("BodyPosition")
+    epsteinSuckBodyPos.MaxForce = Vector3.new(4000, 4000, 4000)
+    epsteinSuckBodyPos.P = 2000
+    epsteinSuckBodyPos.D = 500
+    epsteinSuckBodyPos.Parent = root
+
+    epsteinSuckTrack = epsteinLoadAnimation("73675858945068")
+    if epsteinSuckTrack then
+        epsteinSuckTrack.Looped = true
+        epsteinSuckTrack.Priority = Enum.AnimationPriority.Action
+        epsteinSuckTrack:Play()
+    end
+
+    epsteinSuckRunning = true
+
+    epsteinSuckConnection = RunService.RenderStepped:Connect(function()
+        if not epsteinSuckRunning then return end
+        local c = LocalPlayer.Character
+        if not c then return end
+        local r = c:FindFirstChild("HumanoidRootPart")
+        local h = c:FindFirstChildOfClass("Humanoid")
+        if not r or not h then return end
+
+        if h.Health <= 0 then
+            stopEpsteinSuck()
+            return
+        end
+
+        if not epsteinTarget or not epsteinTarget.Character then
+            stopEpsteinSuck()
+            pcall(function()
+                if WindUI and WindUI.Notify then
+                    WindUI:Notify({ Title = "Suck", Content = "Target lost! Stopping.", Duration = 2, Icon = "alert-circle" })
+                end
+            end)
+            return
+        end
+
+        local targetHead = epsteinTarget.Character:FindFirstChild("Head")
+        if not targetHead then
+            stopEpsteinSuck()
+            return
+        end
+
+        local targetHumanoid = epsteinTarget.Character:FindFirstChildOfClass("Humanoid")
+        if not targetHumanoid or targetHumanoid.Health <= 0 then
+            stopEpsteinSuck()
+            pcall(function()
+                if WindUI and WindUI.Notify then
+                    WindUI:Notify({ Title = "Suck", Content = "Target is dead! Stopping.", Duration = 2, Icon = "skull" })
+                end
+            end)
+            return
+        end
+
+        local speed = epsteinSpeed or 5
+        local offsetForward = 1
+        local offsetHeight = -3
+        local direction = 1
+
+        local targetPos = targetHead.Position + targetHead.CFrame.LookVector * offsetForward * direction
+        targetPos = Vector3.new(targetPos.X, targetHead.Position.Y + offsetHeight, targetPos.Z)
+
+        epsteinSuckBodyPos.Position = targetPos
+
+        local lookDir = (targetHead.Position - targetPos)
+        lookDir = Vector3.new(lookDir.X, 0, lookDir.Z).Unit
+        if lookDir.Magnitude > 0 then
+            r.CFrame = CFrame.new(targetPos, targetPos + lookDir)
+        else
+            r.CFrame = CFrame.new(targetPos)
+        end
+
+        if epsteinSuckTrack then
+            epsteinSuckTrack:AdjustSpeed(speed / 5)
+        end
+    end)
+end
+
+local function stopEpsteinSuck()
+    epsteinSuckRunning = false
+    if epsteinSuckConnection then
+        epsteinSuckConnection:Disconnect()
+        epsteinSuckConnection = nil
+    end
+    if epsteinSuckBodyPos then
+        epsteinSuckBodyPos:Destroy()
+        epsteinSuckBodyPos = nil
+    end
+    if epsteinSuckTrack then
+        epsteinSuckTrack:Stop()
+        epsteinSuckTrack = nil
     end
 end
 
@@ -2258,6 +2380,212 @@ local function loadWindUI()
 
     WindUI = result
     return true
+end
+
+local flingOldPos = nil
+
+local function flingPlayer(targetPlayer)
+    if not targetPlayer or not targetPlayer.Character then return end
+
+    local char = LocalPlayer.Character
+    local humanoid = char and char:FindFirstChildOfClass("Humanoid")
+    local rootPart = humanoid and humanoid.RootPart
+    if not char or not humanoid or not rootPart then return end
+
+    local tChar = targetPlayer.Character
+    if not tChar then return end
+    local tHumanoid = tChar:FindFirstChildOfClass("Humanoid")
+    if not tHumanoid or tHumanoid.Health <= 0 then return end
+    local tRootPart = tHumanoid.RootPart
+    local tHead = tChar:FindFirstChild("Head")
+    local accessory = tChar:FindFirstChildOfClass("Accessory")
+    local handle = accessory and accessory:FindFirstChild("Handle")
+
+    if rootPart.Velocity.Magnitude < 50 then
+        flingOldPos = rootPart.CFrame
+    end
+
+    if tHead then
+        workspace.CurrentCamera.CameraSubject = tHead
+    elseif handle then
+        workspace.CurrentCamera.CameraSubject = handle
+    elseif tRootPart then
+        workspace.CurrentCamera.CameraSubject = tHumanoid
+    end
+
+    if not tChar:FindFirstChildWhichIsA("BasePart") then
+        return
+    end
+
+    local function setPos(basePart, offset, angle)
+        rootPart.CFrame = CFrame.new(basePart.Position) * offset * angle
+        char:SetPrimaryPartCFrame(CFrame.new(basePart.Position) * offset * angle)
+        rootPart.Velocity = Vector3.new(9e7, 9e8, 9e7)
+        rootPart.RotVelocity = Vector3.new(9e8, 9e8, 9e8)
+    end
+
+    local function flingLoop(basePart)
+        local start = tick()
+        local duration = 2
+        local angle = 0
+        repeat
+            if rootPart and tHumanoid and tChar and tChar.Parent and targetPlayer.Parent then
+                if basePart.Velocity.Magnitude < 50 then
+                    angle = angle + 100
+                    setPos(basePart, CFrame.new(0, 1.5, 0) + tHumanoid.MoveDirection * basePart.Velocity.Magnitude / 1.25, CFrame.Angles(math.rad(angle), 0, 0))
+                    task.wait()
+                    setPos(basePart, CFrame.new(0, -1.5, 0) + tHumanoid.MoveDirection * basePart.Velocity.Magnitude / 1.25, CFrame.Angles(math.rad(angle), 0, 0))
+                    task.wait()
+                    setPos(basePart, CFrame.new(2.25, 1.5, -2.25) + tHumanoid.MoveDirection * basePart.Velocity.Magnitude / 1.25, CFrame.Angles(math.rad(angle), 0, 0))
+                    task.wait()
+                    setPos(basePart, CFrame.new(-2.25, -1.5, 2.25) + tHumanoid.MoveDirection * basePart.Velocity.Magnitude / 1.25, CFrame.Angles(math.rad(angle), 0, 0))
+                    task.wait()
+                    setPos(basePart, CFrame.new(0, 1.5, 0) + tHumanoid.MoveDirection, CFrame.Angles(math.rad(angle), 0, 0))
+                    task.wait()
+                    setPos(basePart, CFrame.new(0, -1.5, 0) + tHumanoid.MoveDirection, CFrame.Angles(math.rad(angle), 0, 0))
+                    task.wait()
+                else
+                    setPos(basePart, CFrame.new(0, 1.5, tHumanoid.WalkSpeed), CFrame.Angles(math.rad(90), 0, 0))
+                    task.wait()
+                    setPos(basePart, CFrame.new(0, -1.5, -tHumanoid.WalkSpeed), CFrame.Angles(0, 0, 0))
+                    task.wait()
+                    setPos(basePart, CFrame.new(0, 1.5, tHumanoid.WalkSpeed), CFrame.Angles(math.rad(90), 0, 0))
+                    task.wait()
+                    setPos(basePart, CFrame.new(0, 1.5, tRootPart.Velocity.Magnitude / 1.25), CFrame.Angles(math.rad(90), 0, 0))
+                    task.wait()
+                    setPos(basePart, CFrame.new(0, -1.5, -tRootPart.Velocity.Magnitude / 1.25), CFrame.Angles(0, 0, 0))
+                    task.wait()
+                    setPos(basePart, CFrame.new(0, 1.5, tRootPart.Velocity.Magnitude / 1.25), CFrame.Angles(math.rad(90), 0, 0))
+                    task.wait()
+                    setPos(basePart, CFrame.new(0, -1.5, 0), CFrame.Angles(math.rad(90), 0, 0))
+                    task.wait()
+                    setPos(basePart, CFrame.new(0, -1.5, 0), CFrame.Angles(0, 0, 0))
+                    task.wait()
+                    setPos(basePart, CFrame.new(0, -1.5, 0), CFrame.Angles(math.rad(-90), 0, 0))
+                    task.wait()
+                    setPos(basePart, CFrame.new(0, -1.5, 0), CFrame.Angles(0, 0, 0))
+                    task.wait()
+                end
+            else
+                break
+            end
+        until basePart.Velocity.Magnitude > 500 or basePart.Parent ~= tChar or targetPlayer.Parent ~= Players or tHumanoid.Sit or humanoid.Health <= 0 or tick() > start + duration
+    end
+
+    local oldFallHeight = workspace.FallenPartsDestroyHeight
+    workspace.FallenPartsDestroyHeight = 0/0
+
+    local bv = Instance.new("BodyVelocity")
+    bv.Name = "EpixVel"
+    bv.Parent = rootPart
+    bv.Velocity = Vector3.new(9e8, 9e8, 9e8)
+    bv.MaxForce = Vector3.new(1/0, 1/0, 1/0)
+
+    humanoid:SetStateEnabled(Enum.HumanoidStateType.Seated, false)
+
+    if tRootPart and tHead then
+        if (tRootPart.Position - tHead.Position).Magnitude > 5 then
+            flingLoop(tHead)
+        else
+            flingLoop(tRootPart)
+        end
+    elseif tRootPart then
+        flingLoop(tRootPart)
+    elseif tHead then
+        flingLoop(tHead)
+    elseif handle then
+        flingLoop(handle)
+    else
+        bv:Destroy()
+        humanoid:SetStateEnabled(Enum.HumanoidStateType.Seated, true)
+        workspace.FallenPartsDestroyHeight = oldFallHeight
+        return
+    end
+
+    bv:Destroy()
+    humanoid:SetStateEnabled(Enum.HumanoidStateType.Seated, true)
+    workspace.CurrentCamera.CameraSubject = humanoid
+
+    if flingOldPos then
+        repeat
+            rootPart.CFrame = flingOldPos * CFrame.new(0, 0.5, 0)
+            char:SetPrimaryPartCFrame(flingOldPos * CFrame.new(0, 0.5, 0))
+            humanoid:ChangeState("GettingUp")
+            for _, part in ipairs(char:GetChildren()) do
+                if part:IsA("BasePart") then
+                    part.Velocity = Vector3.new()
+                    part.RotVelocity = Vector3.new()
+                end
+            end
+            task.wait()
+        until (rootPart.Position - flingOldPos.Position).Magnitude < 25
+    end
+
+    workspace.FallenPartsDestroyHeight = oldFallHeight
+end
+
+local function getPlayerByRole(roleName)
+    for _, p in ipairs(Players:GetPlayers()) do
+        if p ~= LocalPlayer and p.Character then
+            local r, _ = getPlayerRole(p)
+            if r == roleName then
+                return p
+            end
+        end
+    end
+    return nil
+end
+
+local function flingMurderer()
+    local murderer = getPlayerByRole("Murderer")
+    if murderer then
+        flingPlayer(murderer)
+        pcall(function()
+            if WindUI and WindUI.Notify then
+                WindUI:Notify({ Title = "Fling", Content = "Murderer flung!", Duration = 2, Icon = "rocket" })
+            end
+        end)
+    else
+        pcall(function()
+            if WindUI and WindUI.Notify then
+                WindUI:Notify({ Title = "Fling", Content = "No murderer found.", Duration = 2, Icon = "alert-circle" })
+            end
+        end)
+    end
+end
+
+local function flingSheriff()
+    local sheriff = getPlayerByRole("Sheriff")
+    if sheriff then
+        flingPlayer(sheriff)
+        pcall(function()
+            if WindUI and WindUI.Notify then
+                WindUI:Notify({ Title = "Fling", Content = "Sheriff flung!", Duration = 2, Icon = "rocket" })
+            end
+        end)
+    else
+        pcall(function()
+            if WindUI and WindUI.Notify then
+                WindUI:Notify({ Title = "Fling", Content = "No sheriff found.", Duration = 2, Icon = "alert-circle" })
+            end
+        end)
+    end
+end
+
+local function flingAll()
+    local count = 0
+    for _, p in ipairs(Players:GetPlayers()) do
+        if p ~= LocalPlayer and p.Character then
+            flingPlayer(p)
+            count = count + 1
+            task.wait(0.2)
+        end
+    end
+    pcall(function()
+        if WindUI and WindUI.Notify then
+            WindUI:Notify({ Title = "Fling", Content = "Flinged " .. count .. " players!", Duration = 2, Icon = "rocket" })
+        end
+    end)
 end
 
 function buildESPUI()
@@ -3748,19 +4076,33 @@ local function buildUI()
             Title = "Auto Reset Character",
             Default = false,
             Callback = function(value)
+                if value then
+                    if Config.AutoFlingMurderer then
+                        Config.AutoFlingMurderer = false
+                        if flingToggleUI then
+                            flingToggleUI:Set(false)
+                        end
+                    end
+                end
                 Config.AutoReset = value
             end
         })
-        autoResetToggle:Lock()
 
-        local flingToggle = farmSection:Toggle({
+        local flingToggleUI = farmSection:Toggle({
             Title = "Auto Fling Murderer",
             Default = false,
             Callback = function(value)
+                if value then
+                    if Config.AutoReset then
+                        Config.AutoReset = false
+                        if autoResetToggle then
+                            autoResetToggle:Set(false)
+                        end
+                    end
+                end
                 Config.AutoFlingMurderer = value
             end
         })
-        flingToggle:Lock()
     end
 
     local trollTab = mainWindow:Tab({ Title = "Troll", Icon = "ghost" })
@@ -3796,7 +4138,7 @@ local function buildUI()
     epsteinSection:Divider()
 
     epsteinFrontToggle = epsteinSection:Toggle({
-        Title = "Fuck in the mouth",
+        Title = "Get Sucked",
         Default = false,
         Callback = function(value)
             if not isFeatureSupported("epsteinJutsu") then
@@ -3810,6 +4152,9 @@ local function buildUI()
             if value then
                 if epsteinBackToggle then
                     epsteinBackToggle:Set(false)
+                end
+                if epsteinSuckToggle then
+                    epsteinSuckToggle:Set(false)
                 end
                 epsteinMode = "front"
                 startEpsteinJutsu()
@@ -3835,12 +4180,158 @@ local function buildUI()
                 if epsteinFrontToggle then
                     epsteinFrontToggle:Set(false)
                 end
+                if epsteinSuckToggle then
+                    epsteinSuckToggle:Set(false)
+                end
                 epsteinMode = "back"
                 startEpsteinJutsu()
             else
                 stopEpsteinJutsu()
             end
         end
+    })
+
+    epsteinSuckToggle = epsteinSection:Toggle({
+        Title = "Suck",
+        Desc = "Same as Get Sucked but 4 studs lower.",
+        Default = false,
+        Callback = function(value)
+            if not isFeatureSupported("epsteinJutsu") then
+                pcall(function()
+                    if WindUI and WindUI.Notify then
+                        WindUI:Notify({ Title = "Suck", Content = "Feature not supported by your executor.", Duration = 5, Icon = "alert-triangle" })
+                    end
+                end)
+                return
+            end
+            if value then
+                if epsteinFrontToggle then
+                    epsteinFrontToggle:Set(false)
+                end
+                if epsteinBackToggle then
+                    epsteinBackToggle:Set(false)
+                end
+                startEpsteinSuck()
+            else
+                stopEpsteinSuck()
+            end
+        end
+    })
+
+    local flingSection = trollTab:Section({
+        Title = "Fling",
+        Opened = true,
+        Icon = "rocket"
+    })
+
+    local selectedFlingTarget = nil
+    local flingToggleActive = false
+    local flingLoopThread = nil
+    local flingToggleUI = nil
+
+    local playerDropdown = flingSection:Dropdown({
+        Title = "Select Player to Fling",
+        Values = {},
+        Callback = function(value)
+            if value and value.Title then
+                selectedFlingTarget = Players:FindFirstChild(value.Title)
+            end
+        end
+    })
+
+    task.spawn(function()
+        while true do
+            task.wait(5)
+            local names = {}
+            for _, p in ipairs(Players:GetPlayers()) do
+                if p ~= LocalPlayer then
+                    table.insert(names, { Title = p.Name, Icon = "user" })
+                end
+            end
+            if playerDropdown then
+                playerDropdown:Refresh(names)
+            end
+        end
+    end)
+
+    local function flingLoopFunction()
+        while flingToggleActive do
+            if selectedFlingTarget and selectedFlingTarget.Character and selectedFlingTarget.Character:FindFirstChild("Humanoid") then
+                flingPlayer(selectedFlingTarget)
+                task.wait(1.5)
+            else
+                if flingToggleUI then
+                    flingToggleUI:Set(false)
+                end
+                flingToggleActive = false
+                pcall(function()
+                    if WindUI and WindUI.Notify then
+                        WindUI:Notify({ Title = "Fling", Content = "Target lost, stopping fling.", Duration = 2, Icon = "alert-circle" })
+                    end
+                end)
+                break
+            end
+        end
+        flingLoopThread = nil
+    end
+
+    flingToggleUI = flingSection:Toggle({
+        Title = "Fling Selected Player (Hold)",
+        Default = false,
+        Callback = function(value)
+            flingToggleActive = value
+            if value then
+                if not selectedFlingTarget then
+                    flingToggleUI:Set(false)
+                    flingToggleActive = false
+                    pcall(function()
+                        if WindUI and WindUI.Notify then
+                            WindUI:Notify({ Title = "Fling", Content = "Select a player first.", Duration = 2, Icon = "alert-circle" })
+                        end
+                    end)
+                    return
+                end
+                if flingLoopThread == nil then
+                    flingLoopThread = task.spawn(flingLoopFunction)
+                end
+            else
+                flingToggleActive = false
+            end
+        end
+    })
+
+    flingSection:Space()
+
+    flingSection:Button({
+        Title = "Fling Murderer",
+        Callback = function()
+            flingMurderer()
+        end
+    })
+
+    flingSection:Button({
+        Title = "Fling Sheriff",
+        Callback = function()
+            flingSheriff()
+        end
+    })
+
+    flingSection:Button({
+        Title = "Fling All",
+        Callback = function()
+            flingAll()
+        end
+    })
+
+    local unlockTab = mainWindow:Tab({ Title = "Unlock All", Icon = "unlock" })
+    local unlockSection = unlockTab:Section({
+        Title = "Unlock All",
+        Opened = true,
+        Icon = "unlock"
+    })
+    unlockSection:Paragraph({
+        Title = "Coming Soon",
+        Content = "Unlock All features will be added here. Please provide the list of features."
     })
 end
 
