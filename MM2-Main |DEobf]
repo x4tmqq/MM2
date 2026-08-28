@@ -100,6 +100,12 @@ local Config = {
     KnifeAttackDelayEnabled = false,
     KnifeAttackDelay = 0.3,
     InstantKnifeThrowEnabled = false,
+    AutoShootMurderer = false,
+    ApplyStabDelay = false,
+    StabDelay = 0.5,
+    RightLegKorblox = false,
+    LeftLegKorblox = false,
+    Headless = false,
 }
 
 local highlightCache = {}
@@ -184,6 +190,16 @@ local fakeDeathActive = false
 local fakeDeathTrack = nil
 local fakeDeathStartPos = nil
 local fakeDeathMonitor = nil
+local autoShootConnection = nil
+local autoShootRunning = false
+local stabDelayEnabled = false
+local stabDelayValue = 0.5
+local visualCharacterConn = nil
+local visualModsApplied = false
+local savedVisualProps = {}
+local rightLegToggleUI = nil
+local leftLegToggleUI = nil
+local headlessToggleUI = nil
 
 local PlayerRoles = {}
 local PlayerData = {}
@@ -1130,6 +1146,10 @@ local function setupCharacter(char)
         setFly(true, Config.FlyMethod, Config.FlySpeed)
     end
 
+    if Config.AutoFarmEnabled then
+        setNoclip(true)
+    end
+
     setupInfiniteJump(Config.InfiniteJump)
     setupSpamJump(Config.SpamJump)
 
@@ -1477,42 +1497,196 @@ if RoundEndFadeEvent then
     end)
 end
 
+local function flingPlayer(targetPlayer)
+    if not targetPlayer or not targetPlayer.Character then return end
+
+    local char = LocalPlayer.Character
+    local humanoid = char and char:FindFirstChildOfClass("Humanoid")
+    local rootPart = humanoid and humanoid.RootPart
+    if not char or not humanoid or not rootPart then return end
+
+    local tChar = targetPlayer.Character
+    if not tChar then return end
+    local tHumanoid = tChar:FindFirstChildOfClass("Humanoid")
+    if not tHumanoid or tHumanoid.Health <= 0 then return end
+    local tRootPart = tHumanoid.RootPart
+    local tHead = tChar:FindFirstChild("Head")
+    local accessory = tChar:FindFirstChildOfClass("Accessory")
+    local handle = accessory and accessory:FindFirstChild("Handle")
+
+    if rootPart.Velocity.Magnitude < 50 then
+        flingOldPos = rootPart.CFrame
+    end
+
+    if tHead then
+        workspace.CurrentCamera.CameraSubject = tHead
+    elseif handle then
+        workspace.CurrentCamera.CameraSubject = handle
+    elseif tRootPart then
+        workspace.CurrentCamera.CameraSubject = tHumanoid
+    end
+
+    if not tChar:FindFirstChildWhichIsA("BasePart") then
+        return
+    end
+
+    local function setPos(basePart, offset, angle)
+        rootPart.CFrame = CFrame.new(basePart.Position) * offset * angle
+        char:SetPrimaryPartCFrame(CFrame.new(basePart.Position) * offset * angle)
+        rootPart.Velocity = Vector3.new(9e7, 9e8, 9e7)
+        rootPart.RotVelocity = Vector3.new(9e8, 9e8, 9e8)
+    end
+
+    local function flingLoop(basePart)
+        local start = tick()
+        local duration = 2
+        local angle = 0
+        repeat
+            if rootPart and tHumanoid and tChar and tChar.Parent and targetPlayer.Parent then
+                if basePart.Velocity.Magnitude < 50 then
+                    angle = angle + 100
+                    setPos(basePart, CFrame.new(0, 1.5, 0) + tHumanoid.MoveDirection * basePart.Velocity.Magnitude / 1.25, CFrame.Angles(math.rad(angle), 0, 0))
+                    task.wait()
+                    setPos(basePart, CFrame.new(0, -1.5, 0) + tHumanoid.MoveDirection * basePart.Velocity.Magnitude / 1.25, CFrame.Angles(math.rad(angle), 0, 0))
+                    task.wait()
+                    setPos(basePart, CFrame.new(2.25, 1.5, -2.25) + tHumanoid.MoveDirection * basePart.Velocity.Magnitude / 1.25, CFrame.Angles(math.rad(angle), 0, 0))
+                    task.wait()
+                    setPos(basePart, CFrame.new(-2.25, -1.5, 2.25) + tHumanoid.MoveDirection * basePart.Velocity.Magnitude / 1.25, CFrame.Angles(math.rad(angle), 0, 0))
+                    task.wait()
+                    setPos(basePart, CFrame.new(0, 1.5, 0) + tHumanoid.MoveDirection, CFrame.Angles(math.rad(angle), 0, 0))
+                    task.wait()
+                    setPos(basePart, CFrame.new(0, -1.5, 0) + tHumanoid.MoveDirection, CFrame.Angles(math.rad(angle), 0, 0))
+                    task.wait()
+                else
+                    setPos(basePart, CFrame.new(0, 1.5, tHumanoid.WalkSpeed), CFrame.Angles(math.rad(90), 0, 0))
+                    task.wait()
+                    setPos(basePart, CFrame.new(0, -1.5, -tHumanoid.WalkSpeed), CFrame.Angles(0, 0, 0))
+                    task.wait()
+                    setPos(basePart, CFrame.new(0, 1.5, tHumanoid.WalkSpeed), CFrame.Angles(math.rad(90), 0, 0))
+                    task.wait()
+                    setPos(basePart, CFrame.new(0, 1.5, tRootPart.Velocity.Magnitude / 1.25), CFrame.Angles(math.rad(90), 0, 0))
+                    task.wait()
+                    setPos(basePart, CFrame.new(0, -1.5, -tRootPart.Velocity.Magnitude / 1.25), CFrame.Angles(0, 0, 0))
+                    task.wait()
+                    setPos(basePart, CFrame.new(0, 1.5, tRootPart.Velocity.Magnitude / 1.25), CFrame.Angles(math.rad(90), 0, 0))
+                    task.wait()
+                    setPos(basePart, CFrame.new(0, -1.5, 0), CFrame.Angles(math.rad(90), 0, 0))
+                    task.wait()
+                    setPos(basePart, CFrame.new(0, -1.5, 0), CFrame.Angles(0, 0, 0))
+                    task.wait()
+                    setPos(basePart, CFrame.new(0, -1.5, 0), CFrame.Angles(math.rad(-90), 0, 0))
+                    task.wait()
+                    setPos(basePart, CFrame.new(0, -1.5, 0), CFrame.Angles(0, 0, 0))
+                    task.wait()
+                end
+            else
+                break
+            end
+        until basePart.Velocity.Magnitude > 500 or basePart.Parent ~= tChar or targetPlayer.Parent ~= Players or tHumanoid.Sit or humanoid.Health <= 0 or tick() > start + duration
+    end
+
+    local oldFallHeight = workspace.FallenPartsDestroyHeight
+    workspace.FallenPartsDestroyHeight = 0/0
+
+    local bv = Instance.new("BodyVelocity")
+    bv.Name = "EpixVel"
+    bv.Parent = rootPart
+    bv.Velocity = Vector3.new(9e8, 9e8, 9e8)
+    bv.MaxForce = Vector3.new(1/0, 1/0, 1/0)
+
+    humanoid:SetStateEnabled(Enum.HumanoidStateType.Seated, false)
+
+    if tRootPart and tHead then
+        if (tRootPart.Position - tHead.Position).Magnitude > 5 then
+            flingLoop(tHead)
+        else
+            flingLoop(tRootPart)
+        end
+    elseif tRootPart then
+        flingLoop(tRootPart)
+    elseif tHead then
+        flingLoop(tHead)
+    elseif handle then
+        flingLoop(handle)
+    else
+        bv:Destroy()
+        humanoid:SetStateEnabled(Enum.HumanoidStateType.Seated, true)
+        workspace.FallenPartsDestroyHeight = oldFallHeight
+        return
+    end
+
+    bv:Destroy()
+    humanoid:SetStateEnabled(Enum.HumanoidStateType.Seated, true)
+    workspace.CurrentCamera.CameraSubject = humanoid
+
+    if flingOldPos then
+        repeat
+            rootPart.CFrame = flingOldPos * CFrame.new(0, 0.5, 0)
+            char:SetPrimaryPartCFrame(flingOldPos * CFrame.new(0, 0.5, 0))
+            humanoid:ChangeState("GettingUp")
+            for _, part in ipairs(char:GetChildren()) do
+                if part:IsA("BasePart") then
+                    part.Velocity = Vector3.new()
+                    part.RotVelocity = Vector3.new()
+                end
+            end
+            task.wait()
+        until (rootPart.Position - flingOldPos.Position).Magnitude < 25
+    end
+
+    workspace.FallenPartsDestroyHeight = oldFallHeight
+end
+
+local function getPlayerByRole(roleName)
+    for _, p in ipairs(Players:GetPlayers()) do
+        if p ~= LocalPlayer and p.Character then
+            local r, _ = getPlayerRole(p)
+            if r == roleName then
+                return p
+            end
+        end
+    end
+    return nil
+end
+
 if CoinCollectedEvent then
-    CoinCollectedEvent.OnClientEvent:Connect(function(itemType, amount)
-        if itemType == "Candy" then
-            candyCount = amount
-            if candyCount >= maxCandy then
-                if Config.AutoReset and roundActive then
+    CoinCollectedEvent.OnClientEvent:Connect(function(bagName, coins, capacity)
+        collectedCount = coins
+        candyCount = coins
+        
+        if capacity and coins >= capacity then
+            pcall(function()
+                if WindUI and WindUI.Notify then
+                    WindUI:Notify({ 
+                        Title = "AutoFarm", 
+                        Content = "Bag full! (" .. coins .. "/" .. capacity .. ")", 
+                        Duration = 2, 
+                        Icon = "package" 
+                    })
+                end
+            end)
+            
+            if Config.AutoReset and roundActive then
+                pcall(function()
+                    if WindUI and WindUI.Notify then
+                        WindUI:Notify({ Title = "AutoFarm", Content = "Resetting character...", Duration = 2, Icon = "refresh-cw" })
+                    end
+                end)
+                if LocalPlayer.Character then
+                    LocalPlayer.Character:BreakJoints()
+                    LocalPlayer.CharacterAdded:Wait()
+                end
+            end
+            
+            if Config.AutoFlingMurderer and roundActive then
+                local murderer = getPlayerByRole("Murderer")
+                if murderer then
                     pcall(function()
                         if WindUI and WindUI.Notify then
-                            WindUI:Notify({ Title = "AutoFarm", Content = "Bag full! Resetting...", Duration = 2, Icon = "refresh-cw" })
+                            WindUI:Notify({ Title = "AutoFarm", Content = "Flinging murderer: " .. murderer.Name, Duration = 2, Icon = "rocket" })
                         end
                     end)
-                    if LocalPlayer.Character then
-                        LocalPlayer.Character:BreakJoints()
-                        LocalPlayer.CharacterAdded:Wait()
-                    end
-                    candyCount = 0
-                end
-                if Config.AutoFlingMurderer and roundActive then
-                    local murderer = nil
-                    for _, p in ipairs(Players:GetPlayers()) do
-                        if p ~= LocalPlayer and p.Character then
-                            local role, _ = getPlayerRole(p)
-                            if role == "Murderer" then
-                                murderer = p
-                                break
-                            end
-                        end
-                    end
-                    if murderer then
-                        pcall(function()
-                            if WindUI and WindUI.Notify then
-                                WindUI:Notify({ Title = "AutoFarm", Content = "Flinging murderer: " .. murderer.Name, Duration = 2, Icon = "rocket" })
-                            end
-                        end)
-                        flingPlayer(murderer)
-                    end
+                    flingPlayer(murderer)
                 end
             end
         end
@@ -1639,7 +1813,9 @@ local function stopAutoFarm()
     end
     autoFarmRunning = false
     autoFarmTarget = nil
-    setNoclip(false)
+    if not Config.NoclipEnabled then
+        setNoclip(false)
+    end
 end
 
 local function setupFakeSpeedGlitch(enabled)
@@ -2117,7 +2293,6 @@ local function findShootRemoteInTool()
     return nil, nil
 end
 
--- Correction de getClosestMurdererForSilent pour cibler même hors écran
 local function getClosestMurdererForSilent()
     local cam = Workspace.CurrentCamera
     if not cam then return nil end
@@ -2139,11 +2314,9 @@ local function getClosestMurdererForSilent()
         local hrp = char:FindFirstChild("HumanoidRootPart")
         if not hrp then continue end
 
-        -- Distance 3D
         local dist3D = (hrp.Position - localRoot.Position).Magnitude
 
         if Config.SilentAimUseFOV then
-            -- Avec FOV : on ne garde que ceux à l'écran et dans le cercle
             local pos, onScreen = cam:WorldToViewportPoint(hrp.Position)
             if onScreen then
                 local screenDist = (Vector2.new(pos.X, pos.Y) - screenCenter).Magnitude
@@ -2153,7 +2326,6 @@ local function getClosestMurdererForSilent()
                 end
             end
         else
-            -- Sans FOV : on prend le plus proche en distance 3D
             if dist3D < bestScore then
                 bestScore = dist3D
                 target = hrp
@@ -2377,158 +2549,6 @@ local function updateSilentFOVCircle()
             silentCircleUpdateConn = nil
         end
     end
-end
-
-local function flingPlayer(targetPlayer)
-    if not targetPlayer or not targetPlayer.Character then return end
-
-    local char = LocalPlayer.Character
-    local humanoid = char and char:FindFirstChildOfClass("Humanoid")
-    local rootPart = humanoid and humanoid.RootPart
-    if not char or not humanoid or not rootPart then return end
-
-    local tChar = targetPlayer.Character
-    if not tChar then return end
-    local tHumanoid = tChar:FindFirstChildOfClass("Humanoid")
-    if not tHumanoid or tHumanoid.Health <= 0 then return end
-    local tRootPart = tHumanoid.RootPart
-    local tHead = tChar:FindFirstChild("Head")
-    local accessory = tChar:FindFirstChildOfClass("Accessory")
-    local handle = accessory and accessory:FindFirstChild("Handle")
-
-    if rootPart.Velocity.Magnitude < 50 then
-        flingOldPos = rootPart.CFrame
-    end
-
-    if tHead then
-        workspace.CurrentCamera.CameraSubject = tHead
-    elseif handle then
-        workspace.CurrentCamera.CameraSubject = handle
-    elseif tRootPart then
-        workspace.CurrentCamera.CameraSubject = tHumanoid
-    end
-
-    if not tChar:FindFirstChildWhichIsA("BasePart") then
-        return
-    end
-
-    local function setPos(basePart, offset, angle)
-        rootPart.CFrame = CFrame.new(basePart.Position) * offset * angle
-        char:SetPrimaryPartCFrame(CFrame.new(basePart.Position) * offset * angle)
-        rootPart.Velocity = Vector3.new(9e7, 9e8, 9e7)
-        rootPart.RotVelocity = Vector3.new(9e8, 9e8, 9e8)
-    end
-
-    local function flingLoop(basePart)
-        local start = tick()
-        local duration = 2
-        local angle = 0
-        repeat
-            if rootPart and tHumanoid and tChar and tChar.Parent and targetPlayer.Parent then
-                if basePart.Velocity.Magnitude < 50 then
-                    angle = angle + 100
-                    setPos(basePart, CFrame.new(0, 1.5, 0) + tHumanoid.MoveDirection * basePart.Velocity.Magnitude / 1.25, CFrame.Angles(math.rad(angle), 0, 0))
-                    task.wait()
-                    setPos(basePart, CFrame.new(0, -1.5, 0) + tHumanoid.MoveDirection * basePart.Velocity.Magnitude / 1.25, CFrame.Angles(math.rad(angle), 0, 0))
-                    task.wait()
-                    setPos(basePart, CFrame.new(2.25, 1.5, -2.25) + tHumanoid.MoveDirection * basePart.Velocity.Magnitude / 1.25, CFrame.Angles(math.rad(angle), 0, 0))
-                    task.wait()
-                    setPos(basePart, CFrame.new(-2.25, -1.5, 2.25) + tHumanoid.MoveDirection * basePart.Velocity.Magnitude / 1.25, CFrame.Angles(math.rad(angle), 0, 0))
-                    task.wait()
-                    setPos(basePart, CFrame.new(0, 1.5, 0) + tHumanoid.MoveDirection, CFrame.Angles(math.rad(angle), 0, 0))
-                    task.wait()
-                    setPos(basePart, CFrame.new(0, -1.5, 0) + tHumanoid.MoveDirection, CFrame.Angles(math.rad(angle), 0, 0))
-                    task.wait()
-                else
-                    setPos(basePart, CFrame.new(0, 1.5, tHumanoid.WalkSpeed), CFrame.Angles(math.rad(90), 0, 0))
-                    task.wait()
-                    setPos(basePart, CFrame.new(0, -1.5, -tHumanoid.WalkSpeed), CFrame.Angles(0, 0, 0))
-                    task.wait()
-                    setPos(basePart, CFrame.new(0, 1.5, tHumanoid.WalkSpeed), CFrame.Angles(math.rad(90), 0, 0))
-                    task.wait()
-                    setPos(basePart, CFrame.new(0, 1.5, tRootPart.Velocity.Magnitude / 1.25), CFrame.Angles(math.rad(90), 0, 0))
-                    task.wait()
-                    setPos(basePart, CFrame.new(0, -1.5, -tRootPart.Velocity.Magnitude / 1.25), CFrame.Angles(0, 0, 0))
-                    task.wait()
-                    setPos(basePart, CFrame.new(0, 1.5, tRootPart.Velocity.Magnitude / 1.25), CFrame.Angles(math.rad(90), 0, 0))
-                    task.wait()
-                    setPos(basePart, CFrame.new(0, -1.5, 0), CFrame.Angles(math.rad(90), 0, 0))
-                    task.wait()
-                    setPos(basePart, CFrame.new(0, -1.5, 0), CFrame.Angles(0, 0, 0))
-                    task.wait()
-                    setPos(basePart, CFrame.new(0, -1.5, 0), CFrame.Angles(math.rad(-90), 0, 0))
-                    task.wait()
-                    setPos(basePart, CFrame.new(0, -1.5, 0), CFrame.Angles(0, 0, 0))
-                    task.wait()
-                end
-            else
-                break
-            end
-        until basePart.Velocity.Magnitude > 500 or basePart.Parent ~= tChar or targetPlayer.Parent ~= Players or tHumanoid.Sit or humanoid.Health <= 0 or tick() > start + duration
-    end
-
-    local oldFallHeight = workspace.FallenPartsDestroyHeight
-    workspace.FallenPartsDestroyHeight = 0/0
-
-    local bv = Instance.new("BodyVelocity")
-    bv.Name = "EpixVel"
-    bv.Parent = rootPart
-    bv.Velocity = Vector3.new(9e8, 9e8, 9e8)
-    bv.MaxForce = Vector3.new(1/0, 1/0, 1/0)
-
-    humanoid:SetStateEnabled(Enum.HumanoidStateType.Seated, false)
-
-    if tRootPart and tHead then
-        if (tRootPart.Position - tHead.Position).Magnitude > 5 then
-            flingLoop(tHead)
-        else
-            flingLoop(tRootPart)
-        end
-    elseif tRootPart then
-        flingLoop(tRootPart)
-    elseif tHead then
-        flingLoop(tHead)
-    elseif handle then
-        flingLoop(handle)
-    else
-        bv:Destroy()
-        humanoid:SetStateEnabled(Enum.HumanoidStateType.Seated, true)
-        workspace.FallenPartsDestroyHeight = oldFallHeight
-        return
-    end
-
-    bv:Destroy()
-    humanoid:SetStateEnabled(Enum.HumanoidStateType.Seated, true)
-    workspace.CurrentCamera.CameraSubject = humanoid
-
-    if flingOldPos then
-        repeat
-            rootPart.CFrame = flingOldPos * CFrame.new(0, 0.5, 0)
-            char:SetPrimaryPartCFrame(flingOldPos * CFrame.new(0, 0.5, 0))
-            humanoid:ChangeState("GettingUp")
-            for _, part in ipairs(char:GetChildren()) do
-                if part:IsA("BasePart") then
-                    part.Velocity = Vector3.new()
-                    part.RotVelocity = Vector3.new()
-                end
-            end
-            task.wait()
-        until (rootPart.Position - flingOldPos.Position).Magnitude < 25
-    end
-
-    workspace.FallenPartsDestroyHeight = oldFallHeight
-end
-
-local function getPlayerByRole(roleName)
-    for _, p in ipairs(Players:GetPlayers()) do
-        if p ~= LocalPlayer and p.Character then
-            local r, _ = getPlayerRole(p)
-            if r == roleName then
-                return p
-            end
-        end
-    end
-    return nil
 end
 
 local function flingMurderer()
@@ -3023,6 +3043,137 @@ local function printUncLogs()
     check("identifyexecutor", function() return identifyexecutor ~= nil end)
     check("setfpscap", function() return setfpscap ~= nil end)
     print("==========================================")
+end
+
+local function applyVisualMods()
+    local char = LocalPlayer.Character
+    if not char then return end
+    local humanoid = char:FindFirstChildOfClass("Humanoid")
+    if not humanoid or humanoid.RigType ~= Enum.HumanoidRigType.R15 then return end
+
+    -- Right Leg Korblox
+    local rightLowerLeg = char:FindFirstChild("RightLowerLeg")
+    local rightFoot = char:FindFirstChild("RightFoot")
+    local rightUpperLeg = char:FindFirstChild("RightUpperLeg")
+
+    if Config.RightLegKorblox then
+        if rightLowerLeg then
+            if not savedVisualProps["RightLowerLeg_Transparency"] then
+                savedVisualProps["RightLowerLeg_Transparency"] = rightLowerLeg.Transparency
+            end
+            rightLowerLeg.Transparency = 1
+        end
+        if rightFoot then
+            if not savedVisualProps["RightFoot_Transparency"] then
+                savedVisualProps["RightFoot_Transparency"] = rightFoot.Transparency
+            end
+            rightFoot.Transparency = 1
+        end
+        if rightUpperLeg and rightUpperLeg:IsA("MeshPart") then
+            if not savedVisualProps["RightUpperLeg_MeshId"] then
+                savedVisualProps["RightUpperLeg_MeshId"] = rightUpperLeg.MeshId
+            end
+            if not savedVisualProps["RightUpperLeg_TextureId"] then
+                savedVisualProps["RightUpperLeg_TextureId"] = rightUpperLeg.TextureID
+            end
+            rightUpperLeg.MeshId = "rbxassetid://9598310133"
+            rightUpperLeg.TextureID = "rbxassetid://902843398"
+        end
+    else
+        if rightLowerLeg and savedVisualProps["RightLowerLeg_Transparency"] ~= nil then
+            rightLowerLeg.Transparency = savedVisualProps["RightLowerLeg_Transparency"]
+            savedVisualProps["RightLowerLeg_Transparency"] = nil
+        end
+        if rightFoot and savedVisualProps["RightFoot_Transparency"] ~= nil then
+            rightFoot.Transparency = savedVisualProps["RightFoot_Transparency"]
+            savedVisualProps["RightFoot_Transparency"] = nil
+        end
+        if rightUpperLeg and rightUpperLeg:IsA("MeshPart") then
+            if savedVisualProps["RightUpperLeg_MeshId"] then
+                rightUpperLeg.MeshId = savedVisualProps["RightUpperLeg_MeshId"]
+                savedVisualProps["RightUpperLeg_MeshId"] = nil
+            end
+            if savedVisualProps["RightUpperLeg_TextureId"] then
+                rightUpperLeg.TextureID = savedVisualProps["RightUpperLeg_TextureId"]
+                savedVisualProps["RightUpperLeg_TextureId"] = nil
+            end
+        end
+    end
+
+    -- Left Leg Korblox
+    local leftLowerLeg = char:FindFirstChild("LeftLowerLeg")
+    local leftFoot = char:FindFirstChild("LeftFoot")
+    local leftUpperLeg = char:FindFirstChild("LeftUpperLeg")
+
+    if Config.LeftLegKorblox then
+        if leftFoot then
+            if not savedVisualProps["LeftFoot_Transparency"] then
+                savedVisualProps["LeftFoot_Transparency"] = leftFoot.Transparency
+            end
+            leftFoot.Transparency = 1
+        end
+        if leftUpperLeg and leftUpperLeg:IsA("MeshPart") then
+            if not savedVisualProps["LeftUpperLeg_MeshId"] then
+                savedVisualProps["LeftUpperLeg_MeshId"] = leftUpperLeg.MeshId
+            end
+            if not savedVisualProps["LeftUpperLeg_TextureId"] then
+                savedVisualProps["LeftUpperLeg_TextureId"] = leftUpperLeg.TextureID
+            end
+            leftUpperLeg.MeshId = "rbxassetid://9598310131"
+            leftUpperLeg.TextureID = "rbxassetid://902842271"
+        end
+        if leftLowerLeg and leftLowerLeg:IsA("MeshPart") then
+            if not savedVisualProps["LeftLowerLeg_MeshId"] then
+                savedVisualProps["LeftLowerLeg_MeshId"] = leftLowerLeg.MeshId
+            end
+            if not savedVisualProps["LeftLowerLeg_TextureId"] then
+                savedVisualProps["LeftLowerLeg_TextureId"] = leftLowerLeg.TextureID
+            end
+            leftLowerLeg.MeshId = "rbxassetid://9598310137"
+            leftLowerLeg.TextureID = "rbxassetid://902842271"
+        end
+    else
+        if leftFoot and savedVisualProps["LeftFoot_Transparency"] ~= nil then
+            leftFoot.Transparency = savedVisualProps["LeftFoot_Transparency"]
+            savedVisualProps["LeftFoot_Transparency"] = nil
+        end
+        if leftUpperLeg and leftUpperLeg:IsA("MeshPart") then
+            if savedVisualProps["LeftUpperLeg_MeshId"] then
+                leftUpperLeg.MeshId = savedVisualProps["LeftUpperLeg_MeshId"]
+                savedVisualProps["LeftUpperLeg_MeshId"] = nil
+            end
+            if savedVisualProps["LeftUpperLeg_TextureId"] then
+                leftUpperLeg.TextureID = savedVisualProps["LeftUpperLeg_TextureId"]
+                savedVisualProps["LeftUpperLeg_TextureId"] = nil
+            end
+        end
+        if leftLowerLeg and leftLowerLeg:IsA("MeshPart") then
+            if savedVisualProps["LeftLowerLeg_MeshId"] then
+                leftLowerLeg.MeshId = savedVisualProps["LeftLowerLeg_MeshId"]
+                savedVisualProps["LeftLowerLeg_MeshId"] = nil
+            end
+            if savedVisualProps["LeftLowerLeg_TextureId"] then
+                leftLowerLeg.TextureID = savedVisualProps["LeftLowerLeg_TextureId"]
+                savedVisualProps["LeftLowerLeg_TextureId"] = nil
+            end
+        end
+    end
+
+    -- Headless
+    local head = char:FindFirstChild("Head")
+    if Config.Headless then
+        if head then
+            if not savedVisualProps["Head_Transparency"] then
+                savedVisualProps["Head_Transparency"] = head.Transparency
+            end
+            head.Transparency = 1
+        end
+    else
+        if head and savedVisualProps["Head_Transparency"] ~= nil then
+            head.Transparency = savedVisualProps["Head_Transparency"]
+            savedVisualProps["Head_Transparency"] = nil
+        end
+    end
 end
 
 local function buildUI()
@@ -3542,6 +3693,71 @@ local function buildUI()
             Icon = "shield"
         })
 
+        sheriffSection:Divider()
+
+        local autoShootToggle = sheriffSection:Toggle({
+            Title = "Auto Shoot Murderer",
+            Desc = "Automatically shoot the murderer when visible.",
+            Default = false,
+            Callback = function(value)
+                Config.AutoShootMurderer = value
+                if value then
+                    if not autoShootConnection then
+                        autoShootRunning = true
+                        autoShootConnection = RunService.Heartbeat:Connect(function()
+                            if not autoShootRunning or not Config.AutoShootMurderer then return end
+                            local char = LocalPlayer.Character
+                            if not char then return end
+                            local gun = char:FindFirstChild("Gun")
+                            if not gun then return end
+                            local role, _ = getPlayerRole(LocalPlayer)
+                            if role ~= "Sheriff" then return end
+                            local murderer = nil
+                            local murdererChar = nil
+                            for _, p in ipairs(Players:GetPlayers()) do
+                                if p == LocalPlayer then continue end
+                                local r, _ = getPlayerRole(p)
+                                if r == "Murderer" then
+                                    murderer = p
+                                    murdererChar = p.Character
+                                    break
+                                end
+                            end
+                            if not murderer or not murdererChar then return end
+                            local head = murdererChar:FindFirstChild("Head")
+                            if not head then return end
+                            local hrp = char:FindFirstChild("HumanoidRootPart")
+                            if not hrp then return end
+                            local rayParams = RaycastParams.new()
+                            rayParams.FilterDescendantsInstances = {char}
+                            rayParams.FilterType = Enum.RaycastFilterType.Blacklist
+                            local result = workspace:Raycast(hrp.Position, (head.Position - hrp.Position).Unit * 1000, rayParams)
+                            if result and result.Instance and murdererChar:IsAncestorOf(result.Instance) then
+                                local ws = getWeaponService()
+                                if ws then
+                                    local targetCF = CFrame.new(head.Position)
+                                    local shootRemote, _ = findShootRemoteInTool()
+                                    if shootRemote then
+                                        shootRemote:FireServer(CFrame.new(hrp.Position), targetCF)
+                                    else
+                                        ws:FireServer("Shoot", targetCF)
+                                    end
+                                end
+                            end
+                        end)
+                    end
+                else
+                    autoShootRunning = false
+                    if autoShootConnection then
+                        autoShootConnection:Disconnect()
+                        autoShootConnection = nil
+                    end
+                end
+            end
+        })
+
+        sheriffSection:Divider()
+
         sheriffSection:Toggle({
             Title = "Silent Aim",
             Desc = "Shoot anywhere, bullets still hit the murderer.",
@@ -3607,144 +3823,84 @@ local function buildUI()
             Icon = "sword"
         })
 
-        local instantThrowToggle = murdererSection:Toggle({
-            Title = "Instant Knife Throw",
-            Desc = "Throw knife instantly with right-click (no charging).",
-            Default = Config.InstantKnifeThrowEnabled,
+        local applyStabToggle = murdererSection:Toggle({
+            Title = "Apply Stab Delay",
+            Desc = "Reduce the delay between knife attacks.",
+            Default = false,
             Callback = function(value)
-                if not isFeatureSupported("instantKnifeThrow") then
-                    pcall(function()
-                        if WindUI and WindUI.Notify then
-                            WindUI:Notify({ Title = "Instant Throw", Content = "Feature not supported by your executor.", Duration = 5, Icon = "alert-triangle" })
+                Config.ApplyStabDelay = value
+                local char = LocalPlayer.Character
+                if char then
+                    local knife = char:FindFirstChild("Knife") or LocalPlayer.Backpack:FindFirstChild("Knife")
+                    if knife then
+                        if value then
+                            local delay = Config.StabDelay or 0.5
+                            knife:SetAttribute("ThrowSpeed", delay)
+                        else
+                            knife:SetAttribute("ThrowSpeed", 1)
+                        end
+                    end
+                end
+                local function modifyKnifeScript()
+                    local knife = LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("Knife")
+                    if not knife then return end
+                    local script = knife:FindFirstChild("KnifeClient")
+                    if not script then return end
+                    local success, err = pcall(function()
+                        local env = getfenv(script)
+                        local function getFunctionFromScript()
+                            for k, v in pairs(env) do
+                                if type(v) == "function" then
+                                    return v
+                                end
+                            end
+                            return nil
+                        end
+                        local mainFunc = getFunctionFromScript()
+                        if mainFunc then
+                            local i = 1
+                            while true do
+                                local name, val = debug.getupvalue(mainFunc, i)
+                                if not name then break end
+                                if name == "u56" or name == "u58" or name == "u64" then
+                                    if value then
+                                        if name == "u56" then debug.setupvalue(mainFunc, i, -1000) end
+                                        if name == "u58" then debug.setupvalue(mainFunc, i, -1000) end
+                                        if name == "u64" then debug.setupvalue(mainFunc, i, 0.01) end
+                                    else
+                                        if name == "u56" then debug.setupvalue(mainFunc, i, -0.85) end
+                                        if name == "u58" then debug.setupvalue(mainFunc, i, -2) end
+                                        if name == "u64" then debug.setupvalue(mainFunc, i, 2) end
+                                    end
+                                end
+                                i = i + 1
+                            end
                         end
                     end)
-                    return
+                    if not success then
+                        warn("Failed to modify knife script upvalues:", err)
+                    end
                 end
-                Config.InstantKnifeThrowEnabled = value
-                updateKnifeDelay()
-            end
-        })
-
-        murdererSection:Divider()
-
-        murdererSection:Toggle({
-            Title = "Knife Attack Delay",
-            Desc = "Reduce the delay between knife throws.",
-            Default = Config.KnifeAttackDelayEnabled,
-            Callback = function(value)
-                Config.KnifeAttackDelayEnabled = value
-                updateKnifeDelay()
+                modifyKnifeScript()
             end
         })
 
         murdererSection:Slider({
-            Title = "Attack Delay (s)",
-            Value = { Min = 0.1, Max = 1, Default = Config.KnifeAttackDelay },
+            Title = "Knife Delay",
+            Value = { Min = 0, Max = 1, Default = 0.5 },
             Rounding = 1,
             Enabled = true,
             Callback = function(value)
-                Config.KnifeAttackDelay = value
-                if Config.KnifeAttackDelayEnabled then
-                    updateKnifeDelay()
-                end
-            end
-        })
-    end
-
-    local farmTab = mainWindow:Tab({ Title = "Auto Farm", Icon = "trending-up" })
-
-    do
-        local farmSection = farmTab:Section({
-            Title = "Auto Farm Settings",
-            Opened = true,
-            Icon = "settings"
-        })
-
-        farmSection:Toggle({
-            Title = "Enable Auto Farm",
-            Desc = "fastest mm2 auto farm (w x4tmq)",
-            Default = false,
-            Callback = function(value)
-                if not isFeatureSupported("autoFarm") then
-                    pcall(function()
-                        if WindUI and WindUI.Notify then
-                            WindUI:Notify({ Title = "Auto Farm", Content = "Feature not supported by your executor.", Duration = 5, Icon = "alert-triangle" })
-                        end
-                    end)
-                    return
-                end
-                Config.AutoFarmEnabled = value
-                if value then
-                    startAutoFarm()
-                else
-                    stopAutoFarm()
-                end
-            end
-        })
-
-        farmSection:Dropdown({
-            Title = "Stuff to farm",
-            Values = { "Coins" },
-            Value = "Coins",
-            Callback = function(value)
-                Config.AutoFarmType = value
-                if Config.AutoFarmEnabled then
-                    stopAutoFarm()
-                    startAutoFarm()
-                end
-            end
-        })
-
-        farmSection:Dropdown({
-            Title = "Method",
-            Values = { "Nearest", "Randomize" },
-            Value = "Nearest",
-            Callback = function(value)
-                Config.AutoFarmMethod = value
-            end
-        })
-
-        farmSection:Slider({
-            Title = "AutoFarm Speed",
-            Value = { Min = 1, Max = 25, Default = 25 },
-            Rounding = 0,
-            Enabled = true,
-            Callback = function(value)
-                Config.AutoFarmSpeed = value
-            end
-        })
-
-        farmSection:Divider()
-
-        local autoResetToggle = farmSection:Toggle({
-            Title = "Auto Reset Character",
-            Default = false,
-            Callback = function(value)
-                if value then
-                    if Config.AutoFlingMurderer then
-                        Config.AutoFlingMurderer = false
-                        if flingToggleUI then
-                            flingToggleUI:Set(false)
+                Config.StabDelay = value
+                if Config.ApplyStabDelay then
+                    local char = LocalPlayer.Character
+                    if char then
+                        local knife = char:FindFirstChild("Knife") or LocalPlayer.Backpack:FindFirstChild("Knife")
+                        if knife then
+                            knife:SetAttribute("ThrowSpeed", value)
                         end
                     end
                 end
-                Config.AutoReset = value
-            end
-        })
-
-        local flingToggleUI = farmSection:Toggle({
-            Title = "Auto Fling Murderer",
-            Default = false,
-            Callback = function(value)
-                if value then
-                    if Config.AutoReset then
-                        Config.AutoReset = false
-                        if autoResetToggle then
-                            autoResetToggle:Set(false)
-                        end
-                    end
-                end
-                Config.AutoFlingMurderer = value
             end
         })
     end
@@ -4157,6 +4313,158 @@ local function buildUI()
     end
 
     mainWindow:OnClose(cleanupFunny)
+
+    mainWindow:Divider()
+
+    local visualTab = mainWindow:Tab({ Title = "Visual", Icon = "eye-off" })
+
+    local skinSection = visualTab:Section({
+        Title = "Skin Modifier",
+        Opened = true,
+        Icon = "shirt"
+    })
+
+    rightLegToggleUI = skinSection:Toggle({
+        Title = "Right Leg Korblox",
+        Default = false,
+        Callback = function(value)
+            Config.RightLegKorblox = value
+            applyVisualMods()
+        end
+    })
+
+    leftLegToggleUI = skinSection:Toggle({
+        Title = "Left Leg Korblox",
+        Default = false,
+        Callback = function(value)
+            Config.LeftLegKorblox = value
+            applyVisualMods()
+        end
+    })
+
+    skinSection:Divider()
+
+    headlessToggleUI = skinSection:Toggle({
+        Title = "Headless",
+        Default = false,
+        Callback = function(value)
+            Config.Headless = value
+            applyVisualMods()
+        end
+    })
+
+    local animSection = visualTab:Section({
+        Title = "Animations",
+        Opened = true,
+        Icon = "person-standing"
+    })
+
+    animSection:Button({
+        Title = "Get all Marketplace animation",
+        Callback = function()
+            loadstring(game:HttpGet("https://raw.githubusercontent.com/7yd7/Hub/refs/heads/Branch/GUIS/Emotes.lua"))()
+        end
+    })
+
+    mainWindow:Divider()
+
+    local farmTab = mainWindow:Tab({ Title = "Auto Farm", Icon = "trending-up" })
+
+    do
+        local farmSection = farmTab:Section({
+            Title = "Auto Farm Settings",
+            Opened = true,
+            Icon = "settings"
+        })
+
+        farmSection:Toggle({
+            Title = "Enable Auto Farm",
+            Desc = "fastest mm2 auto farm (w x4tmq)",
+            Default = false,
+            Callback = function(value)
+                if not isFeatureSupported("autoFarm") then
+                    pcall(function()
+                        if WindUI and WindUI.Notify then
+                            WindUI:Notify({ Title = "Auto Farm", Content = "Feature not supported by your executor.", Duration = 5, Icon = "alert-triangle" })
+                        end
+                    end)
+                    return
+                end
+                Config.AutoFarmEnabled = value
+                if value then
+                    startAutoFarm()
+                else
+                    stopAutoFarm()
+                end
+            end
+        })
+
+        farmSection:Dropdown({
+            Title = "Stuff to farm",
+            Values = { "Coins" },
+            Value = "Coins",
+            Callback = function(value)
+                Config.AutoFarmType = value
+                if Config.AutoFarmEnabled then
+                    stopAutoFarm()
+                    startAutoFarm()
+                end
+            end
+        })
+
+        farmSection:Dropdown({
+            Title = "Method",
+            Values = { "Nearest", "Randomize" },
+            Value = "Nearest",
+            Callback = function(value)
+                Config.AutoFarmMethod = value
+            end
+        })
+
+        farmSection:Slider({
+            Title = "AutoFarm Speed",
+            Value = { Min = 1, Max = 25, Default = 25 },
+            Rounding = 0,
+            Enabled = true,
+            Callback = function(value)
+                Config.AutoFarmSpeed = value
+            end
+        })
+
+        farmSection:Divider()
+
+        local autoResetToggle = farmSection:Toggle({
+            Title = "Auto Reset Character",
+            Default = false,
+            Callback = function(value)
+                if value then
+                    if Config.AutoFlingMurderer then
+                        Config.AutoFlingMurderer = false
+                        if flingToggleUI then
+                            flingToggleUI:Set(false)
+                        end
+                    end
+                end
+                Config.AutoReset = value
+            end
+        })
+
+        local flingToggleUI = farmSection:Toggle({
+            Title = "Auto Fling Murderer",
+            Default = false,
+            Callback = function(value)
+                if value then
+                    if Config.AutoReset then
+                        Config.AutoReset = false
+                        if autoResetToggle then
+                            autoResetToggle:Set(false)
+                        end
+                    end
+                end
+                Config.AutoFlingMurderer = value
+            end
+        })
+    end
 end
 
 local function initialize()
@@ -4229,15 +4537,16 @@ local function initialize()
         end
     end)
 
-    local char = LocalPlayer.Character
-    if char then
-        setupCharacter(char)
-        updateKnifeDelay()
-    end
+local function setupVisualCharacter(char)
+    if not char then return end
+    task.wait(0.5)
+    applyVisualMods()
+end
 
     local charAddedConn = LocalPlayer.CharacterAdded:Connect(function(char)
         setupCharacter(char)
         updateKnifeDelay()
+        setupVisualCharacter(char)
     end)
     maid:add(charAddedConn)
 
