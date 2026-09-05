@@ -222,7 +222,6 @@ CooldownCounter = 0
 CooldownData = { Bash = nil, Kick = nil }
 ActiveTweens = {}
 CachedMobs = {}
-tracerCache = {}
 OrigAmbient = Lighting.Ambient
 OrigOutdoorAmbient = Lighting.OutdoorAmbient
 OrigBrightness = Lighting.Brightness
@@ -2050,8 +2049,6 @@ function checkMob(obj)
             local mobId = obj:GetDebugId()
             obj.AncestryChanged:Connect(function(child, parent)
                 if parent == nil then
-                    local line = tracerCache[mobId]
-                    if line then line.Visible = false end
                     for i, m in ipairs(CachedMobs) do
                         if m == obj then
                             table.remove(CachedMobs, i)
@@ -2095,22 +2092,6 @@ UserInputService.JumpRequest:Connect(function()
             hrp.Velocity = Vector3.new(hrp.Velocity.X, actualJumpPower, hrp.Velocity.Z)
         end
     end
-end)
-
-function getTracer(id)
-    if not Drawing then return nil end
-    if not tracerCache[id] then
-        local line = Drawing.new("Line")
-        line.Thickness = 1.5
-        line.Transparency = 1
-        tracerCache[id] = line
-    end
-    return tracerCache[id]
-end
-
-Players.PlayerRemoving:Connect(function(player)
-    local line = tracerCache[player.UserId]
-    if line then line.Visible = false end
 end)
 
 RunService.RenderStepped:Connect(function(dt)
@@ -3196,7 +3177,7 @@ WindUI.Services.SentinelKeyService = {
         end
         
         function copyLink()
-            local link = "https://discord.gg/vTE8NQPsUb"
+            local link = "https://discord.gg/dyQsQVV8ck"
             if setclipboard then
                 setclipboard(link)
             else
@@ -3528,30 +3509,36 @@ function BuildUI()
 
         do
             local s = tab:Section({Title = "Noclip", Opened = true, Icon = "ghost"})
+            -- NOUVEAU NOCLIP : désactive CanCollide sur toutes les pièces du personnage
             s:Toggle({ Title = "Enable Noclip", Default = false, Callback = function(v)
                 Config.NoclipEnabled = v
                 if v then
                     if not noclipConnection then
-                        noclipConnection = RunService.Heartbeat:Connect(function()
-                            if not Config.NoclipEnabled then return end
-                            local char = LocalPlayer.Character
-                            if char then
-                                for _, part in ipairs(char:GetDescendants()) do
-                                    if part:IsA("BasePart") then
-                                        part.CanCollide = false
+                        -- Lance une boucle qui s'exécute toutes les 0.21s
+                        local function noclipLoop()
+                            while Config.NoclipEnabled do
+                                local char = LocalPlayer.Character
+                                if char then
+                                    for _, part in pairs(char:GetDescendants()) do
+                                        if part:IsA("BasePart") and part.CanCollide then
+                                            part.CanCollide = false
+                                        end
                                     end
                                 end
+                                task.wait(0.21)
                             end
-                        end)
+                        end
+                        noclipConnection = task.spawn(noclipLoop)
                     end
                 else
                     if noclipConnection then
-                        noclipConnection:Disconnect()
+                        task.cancel(noclipConnection)
                         noclipConnection = nil
                     end
+                    -- Restaurer les collisions
                     local char = LocalPlayer.Character
                     if char then
-                        for _, part in ipairs(char:GetDescendants()) do
+                        for _, part in pairs(char:GetDescendants()) do
                             if part:IsA("BasePart") then
                                 part.CanCollide = true
                             end
@@ -3587,33 +3574,29 @@ function BuildUI()
         local tab = Tabs.ESP
 
         local globalS = tab:Section({Title = "Global ESP Settings", Opened = true, Icon = "globe"})
-        globalS:Slider({ Title = "Outline Transparency", Value = {Min = 0, Max = 1, Default = Config.HLOutlineTrans}, Rounding = 2, Enabled = true, Callback = function(v) Config.HLOutlineTrans = v end })
-        globalS:Slider({ Title = "Highlight Transparency", Value = {Min = 0, Max = 1, Default = Config.HLFillTrans}, Rounding = 2, Enabled = true, Callback = function(v) Config.HLFillTrans = v end })
+        globalS:Slider({ Title = "Outline Transparency", Value = {Min = 0, Max = 100, Default = Config.HLOutlineTrans}, Rounding = 0, Enabled = true, Callback = function(v) Config.HLOutlineTrans = v end })
+        globalS:Slider({ Title = "Highlight Transparency", Value = {Min = 0, Max = 100, Default = Config.HLFillTrans}, Rounding = 0, Enabled = true, Callback = function(v) Config.HLFillTrans = v end })
         globalS:Slider({ Title = "Max Distance", Value = {Min = 50, Max = 2000, Default = Config.MaxDistance}, Rounding = 0, Enabled = true, Callback = function(v) Config.MaxDistance = v end })
 
         local bossS = tab:Section({Title = "Boss ESP Settings", Opened = true, Icon = "skull"})
         bossS:Colorpicker({ Title = "Boss Color", Default = Config.ColorBosses, Callback = function(v) Config.ColorBosses = v end })
         bossS:Toggle({ Title = "Highlight Bosses", Default = false, Callback = function(v) Config.HighlightBosses = v end })
         bossS:Toggle({ Title = "Show Info", Default = false, Callback = function(v) Config.HealthBosses = v end })
-        bossS:Toggle({ Title = "Tracers", Default = false, Callback = function(v) Config.TracerBosses = v end })
 
         local mobS = tab:Section({Title = "Mobs ESP Settings", Opened = true, Icon = "syringe"})
         mobS:Colorpicker({ Title = "Mobs Color", Default = Config.ColorMobs, Callback = function(v) Config.ColorMobs = v end })
         mobS:Toggle({ Title = "Highlight Mobs", Default = false, Callback = function(v) Config.HighlightMobs = v end })
         mobS:Toggle({ Title = "Show Info", Default = false, Callback = function(v) Config.HealthMobs = v end })
-        mobS:Toggle({ Title = "Tracers", Default = false, Callback = function(v) Config.TracerMobs = v end })
 
         local playerS = tab:Section({Title = "Players ESP Settings", Opened = true, Icon = "user-round-plus"})
         playerS:Colorpicker({ Title = "Players Color", Default = Config.ColorPlayer, Callback = function(v) Config.ColorPlayer = v end })
         playerS:Toggle({ Title = "Highlight Players", Default = false, Callback = function(v) Config.HighlightPlayer = v end })
         playerS:Toggle({ Title = "Show Info", Default = false, Callback = function(v) Config.HealthPlayer = v end })
-        playerS:Toggle({ Title = "Tracers", Default = false, Callback = function(v) Config.TracerPlayer = v end })
 
         local friendS = tab:Section({Title = "Friends ESP Settings", Opened = true, Icon = "user-round-check"})
         friendS:Colorpicker({ Title = "Friends Color", Default = Config.ColorFriends, Callback = function(v) Config.ColorFriends = v end })
         friendS:Toggle({ Title = "Highlight Friends", Default = false, Callback = function(v) Config.HighlightFriends = v end })
         friendS:Toggle({ Title = "Show Info", Default = false, Callback = function(v) Config.HealthFriends = v end })
-        friendS:Toggle({ Title = "Tracers", Default = false, Callback = function(v) Config.TracerFriends = v end })
     end
 
     do
@@ -4518,7 +4501,6 @@ RunService.RenderStepped:Connect(function()
                 local isFriend = LocalPlayer:IsFriendsWith(player.UserId)
                 local hlToggle = isFriend and Config.HighlightFriends or Config.HighlightPlayer
                 local hpToggle = isFriend and Config.HealthFriends or Config.HealthPlayer
-                local trToggle = isFriend and Config.TracerFriends or Config.TracerPlayer
                 local color = isFriend and Config.ColorFriends or Config.ColorPlayer
                 if distance <= Config.MaxDistance then
                     local hl = char:FindFirstChild("SentinelHL")
@@ -4551,28 +4533,9 @@ RunService.RenderStepped:Connect(function()
                             bgui.TextLabel.Text = string.format("%s [%d HP]", player.Name, math.round(phum.Health))
                         end
                     elseif bgui then bgui:Destroy() end
-                    local line = getTracer(player.UserId)
-                    if line then
-                        if trToggle then
-                            local vector, onScreen = Camera:WorldToViewportPoint(phrp.Position)
-                            if onScreen then
-                                line.From = Vector2.new(Camera.ViewportSize.X / 2, Camera.ViewportSize.Y)
-                                line.To = Vector2.new(vector.X, vector.Y)
-                                line.Color = color
-                                line.Transparency = 0
-                                line.Visible = true
-                            else
-                                line.Visible = false
-                            end
-                        else
-                            line.Visible = false
-                        end
-                    end
                 else
                     if char:FindFirstChild("SentinelHL") then char.SentinelHL:Destroy() end
                     if phrp:FindFirstChild("SentinelHP") then phrp.SentinelHP:Destroy() end
-                    local line = tracerCache[player.UserId]
-                    if line then line.Visible = false end
                 end
             end
         end
@@ -4585,8 +4548,6 @@ RunService.RenderStepped:Connect(function()
                 if obj:FindFirstChild("SentinelMobHL") then obj.SentinelMobHL:Destroy() end
                 local badHrp = obj:FindFirstChild("HumanoidRootPart")
                 if badHrp and badHrp:FindFirstChild("SentinelMobHP") then badHrp.SentinelMobHP:Destroy() end
-                local badId = obj:GetDebugId()
-                if tracerCache[badId] then tracerCache[badId].Visible = false end
                 table.remove(CachedMobs, i)
                 continue
             end
@@ -4594,12 +4555,10 @@ RunService.RenderStepped:Connect(function()
             local mhum = obj:FindFirstChildOfClass("Humanoid")
             if mhrp and mhum then
                 local distance = (myHrp.Position - mhrp.Position).Magnitude
-                local mobId = obj:GetDebugId()
                 if distance <= Config.MaxDistance and mhum.Health > 0 then
                     local isBossEntity = isBoss(obj)
                     local hlToggle = isBossEntity and Config.HighlightBosses or Config.HighlightMobs
                     local hpToggle = isBossEntity and Config.HealthBosses or Config.HealthMobs
-                    local trToggle = isBossEntity and Config.TracerBosses or Config.TracerMobs
                     local color = isBossEntity and Config.ColorBosses or Config.ColorMobs
 
                     local hl = obj:FindFirstChild("SentinelMobHL")
@@ -4632,28 +4591,9 @@ RunService.RenderStepped:Connect(function()
                             bgui.TextLabel.Text = string.format("%s [%d HP]", obj.Name, math.round(mhum.Health))
                         end
                     elseif bgui then bgui:Destroy() end
-                    local line = getTracer(mobId)
-                    if line then
-                        if trToggle then
-                            local vector, onScreen = Camera:WorldToViewportPoint(mhrp.Position)
-                            if onScreen then
-                                line.From = Vector2.new(Camera.ViewportSize.X / 2, Camera.ViewportSize.Y)
-                                line.To = Vector2.new(vector.X, vector.Y)
-                                line.Color = color
-                                line.Transparency = 0
-                                line.Visible = true
-                            else
-                                line.Visible = false
-                            end
-                        else
-                            line.Visible = false
-                        end
-                    end
                 else
                     if obj:FindFirstChild("SentinelMobHL") then obj.SentinelMobHL:Destroy() end
                     if mhrp and mhrp:FindFirstChild("SentinelMobHP") then mhrp.SentinelMobHP:Destroy() end
-                    local line = tracerCache[mobId]
-                    if line then line.Visible = false end
                 end
             end
         else
